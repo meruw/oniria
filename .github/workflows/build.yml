@@ -1,0 +1,59 @@
+name: build
+
+# Builds the game on every push and pull request, runs the self-test, and keeps
+# the result as a download. Pushing a tag like v0.1.0 also publishes a release
+# with the Windows build attached.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: cmd
+        run: build.bat
+      - name: Self-test
+        shell: cmd
+        run: build\oniria.exe --selftest
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package\oniria | Out-Null
+          Copy-Item build\oniria.exe, README.md, LICENSE package\oniria
+          Compress-Archive -Path package\oniria -DestinationPath oniria-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oniria-windows-x64
+          path: oniria-windows-x64.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" oniria-windows-x64.zip --title "ONIRIA ${{ github.ref_name }}" --generate-notes
+
+  linux:
+    # Experimental: checks that the shared code builds and analyses music correctly on Linux.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev
+      - name: Build
+        run: sh build.sh
+      - name: Self-test
+        run: build/oniria --selftest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oniria-linux-x64
+          path: build/oniria

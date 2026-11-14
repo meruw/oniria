@@ -403,7 +403,40 @@ static bool gTutorial = false, gWantTutorial = false, gJobTutorial = false;
 
 // A key press belongs to the screen that was showing when the frame began, so
 // the Esc that pauses the game is not also read as "resume" by the pause menu.
-static bool Key(int key) { return gState == gFrameState && IsKeyPressed(key); }
+// ---- Gamepad ----
+// The first connected pad works alongside the keyboard. While playing, the
+// d-pad and the face buttons are the four actions (left hand: hop and bat,
+// right hand: swat and ring) and Start pauses. In menus the d-pad moves, the
+// bottom face button accepts, and the right one or Start goes back.
+static const int kPadA[4] = { GAMEPAD_BUTTON_LEFT_FACE_LEFT, GAMEPAD_BUTTON_LEFT_FACE_RIGHT, GAMEPAD_BUTTON_RIGHT_FACE_LEFT, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT };
+static const int kPadB[4] = { GAMEPAD_BUTTON_LEFT_FACE_DOWN, GAMEPAD_BUTTON_LEFT_FACE_UP, GAMEPAD_BUTTON_RIGHT_FACE_UP, GAMEPAD_BUTTON_RIGHT_FACE_DOWN };
+static bool gLaneInput = false;   // true while the pad's buttons mean actions rather than menu moves
+
+static bool PadLanePressed(int lane)
+{
+    return !gSim && IsGamepadAvailable(0) && (IsGamepadButtonPressed(0, kPadA[lane]) || IsGamepadButtonPressed(0, kPadB[lane]));
+}
+static bool PadLaneDown(int lane)
+{
+    return !gSim && IsGamepadAvailable(0) && (IsGamepadButtonDown(0, kPadA[lane]) || IsGamepadButtonDown(0, kPadB[lane]));
+}
+static bool PadMenu(int key)
+{
+    if (gSim || !IsGamepadAvailable(0)) return false;
+    if (key == KEY_ESCAPE && IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT)) return true;
+    if (gLaneInput) return false;
+    switch (key) {
+        case KEY_ENTER:  return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+        case KEY_ESCAPE: return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
+        case KEY_UP:     return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_UP);
+        case KEY_DOWN:   return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_DOWN);
+        case KEY_LEFT:   return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_LEFT);
+        case KEY_RIGHT:  return IsGamepadButtonPressed(0, GAMEPAD_BUTTON_LEFT_FACE_RIGHT);
+        default:         return false;
+    }
+}
+
+static bool Key(int key) { return gState == gFrameState && (IsKeyPressed(key) || PadMenu(key)); }
 
 // Queues a sound effect. `semitones` shifts its pitch; `gain` is relative to the sound's own level.
 static void PlaySfx(int sound, float semitones = 0.0f, float gain = 1.0f)
@@ -2483,11 +2516,13 @@ static void UpdatePlaying(double t)
                 gHeld[a] = IsKeyDown(kKeyA[a]) || IsKeyDown(kKeyB[a]);
             }
         }
+        for (int a = 0; a < actions; a++)   // pad presses are read once a frame, so they are stamped with the frame's time
+            if (PadLanePressed(a)) Press(a, t);
     }
 
     if (gHoldNote >= 0) {   // a long note in progress
         const double from = gChart->time[gHoldNote], end = from + HoldOf(gHoldNote);
-        const bool down = gCfg.watch || gHeld[ACT_BAT];
+        const bool down = gCfg.watch || gHeld[ACT_BAT] || PadLaneDown(ACT_BAT);
         const Vector3 at = { gScene.worldX + kReach, PathHeight(gScene.worldX + kReach) + 0.4f, 0.0f };
         if (t >= end - 0.15 && down) {          // kept to the end (letting go a touch early still counts)
             gScore += 250;
@@ -4827,9 +4862,12 @@ static void UpdateCalibration(float dt)
     LaneKeyEvent events[32];
     const int n = PlatformPollKeys(events, 32);
     if (n > 0) gRawKeys = true;
+    gLaneInput = gCal.phase == 1;
     if (gCal.phase != 1) return;
     for (int i = 0; i < n; i++)
         if (events[i].down) CalTap(events[i].time);
+    for (int a = 0; a < 4; a++)
+        if (PadLanePressed(a)) CalTap(NowSeconds());
     if (!gRawKeys)
         for (int a = 0; a < 4; a++)
             if (IsKeyPressed(kKeyA[a]) || IsKeyPressed(kKeyB[a])) CalTap(NowSeconds());
@@ -5432,6 +5470,7 @@ int main(int argc, char** argv)
         }
 
         double t = gPausedAt;
+        gLaneInput = gState == ST_PLAYING;
         switch (gState) {
             case ST_LOADING:
                 if (gJob.stage.load() == 3) FinishLoad();
