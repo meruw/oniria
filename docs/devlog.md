@@ -2,6 +2,20 @@
 
 Newest entries first.
 
+## 2026-11-13: polish pass on the cat world
+
+The cozy direction was approved, so this pass cleaned up what the first screenshots showed:
+
+- **Bells.** Each bell hung from a dark wooden post, and on the hardest difficulty the posts crowded the screen. Bells now hang from tall green flower stalks that arch over the path. They blend into the grass, so the bells stand out and the stalks do not.
+- **Where to hit.** A soft spot of light on the path, just ahead of the cat, marks the point where objects should be answered. It pulses with the kick drum.
+- **The cat.** It blinks, and squints for a moment after a perfect hit.
+- **Any window shape.** The camera pulls back in narrow windows so there is always the same amount of path ahead of the cat, the ground extends further towards the camera, and the canvas is never narrower than 480 pixels so the menus always fit. Checked at 16:9, ultrawide, portrait and the 480x360 minimum.
+- **Starting with a song.** `oniria.exe song.mp3` opens the game with that file loaded, which also lets the screenshot mode test real files.
+
+Measured while doing this: a full simulated run of the demo track at a 1920x1080 window (about 2760 frames, hardest difficulty) renders in roughly 2.5 seconds including startup, under a millisecond per frame.
+
+FLAC turned out not to be compiled into the prebuilt raylib release, so it was removed from the file dialog and the docs.
+
 ## 2026-11-13: first prototype, and a change of direction
 
 **Where it started.** The brief was a highly optimized rhythm game that builds itself from any song you give it, with a psychedelic look.
@@ -32,5 +46,4 @@ Everything underneath (analysis, audio, input, loading, scoring) carried over un
 
 - Nobody has played it with real audio and real key presses yet. Timing feel and the default latency are unverified.
 - Charts have only been judged on the demo track. Real music, especially without drums, will need tuning.
-- On the hardest difficulty the bell posts crowd the screen.
 - The name predates the cats.

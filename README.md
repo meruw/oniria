@@ -21,9 +21,9 @@ The cat walks by itself. Things appear on the path in time with the music, and e
 | `D` | Hop | Logs lying across the path |
 | `F` | Bat | Balls of yarn |
 | `J` | Swat | Butterflies |
-| `K` | Ring | Bells hanging over the path |
+| `K` | Ring | Bellflowers arching over the path |
 
-The arrow keys work too (left, down, up, right). `Esc` pauses, `F11` toggles fullscreen.
+A soft spot of light just ahead of the cat marks where each thing should be answered. The arrow keys work too (left, down, up, right). `Esc` pauses, `F11` toggles fullscreen.
 
 There are three difficulties. **Cozy** only uses hop and bat, **Playful** adds butterflies, and **Zoomies** uses all four and sometimes asks for two at once.
 
@@ -36,7 +36,7 @@ Other options on the song screen:
 
 ## Loading music
 
-Drop an audio file on the window, or use **Open a song**. MP3, OGG, WAV and QOA are supported. Nothing is uploaded anywhere; the file is decoded and analyzed on your machine, which takes well under a second for a normal song.
+Drop an audio file on the window, use **Open a song**, or pass the file on the command line (`oniria.exe song.mp3`). MP3, OGG, WAV and QOA are supported. Nothing is uploaded anywhere; the file is decoded and analyzed on your machine, which takes well under a second for a normal song.
 
 There is also a built-in demo track, synthesized at startup, so the game is playable without any file.
 

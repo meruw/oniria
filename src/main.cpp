@@ -350,6 +350,27 @@ static void AddBlob(Shape& s, Vector3 c, Vector3 radii, Vector3 col)
     Orient(s, from, c);
 }
 
+// A square beam from `a` to `b`.
+static void AddBeam(Shape& s, Vector3 a, Vector3 b, float half, Vector3 col)
+{
+    const size_t from = s.size();
+    const Vector3 d = Vector3Normalize(Vector3Subtract(b, a));
+    const Vector3 ref = fabsf(d.x) < 0.9f ? Vector3{ 1, 0, 0 } : Vector3{ 0, 0, 1 };
+    const Vector3 u = Vector3Scale(Vector3Normalize(Vector3CrossProduct(d, ref)), half);
+    const Vector3 v = Vector3Scale(Vector3Normalize(Vector3CrossProduct(d, u)), half);
+    Vector3 c[8];
+    for (int i = 0; i < 8; i++) {
+        const Vector3 end = (i & 4) ? b : a;
+        c[i] = Vector3Add(end, Vector3Add(Vector3Scale(u, (i & 1) ? 1.0f : -1.0f), Vector3Scale(v, (i & 2) ? 1.0f : -1.0f)));
+    }
+    static const int f[6][4] = { { 0, 1, 3, 2 }, { 4, 6, 7, 5 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 2, 6, 4 }, { 1, 5, 7, 3 } };
+    for (int i = 0; i < 6; i++) {
+        s.push_back({ c[f[i][0]], c[f[i][1]], c[f[i][2]], col });
+        s.push_back({ c[f[i][0]], c[f[i][2]], c[f[i][3]], col });
+    }
+    Orient(s, from, Vector3Scale(Vector3Add(a, b), 0.5f));
+}
+
 static void AddShape(Shape& dst, const Shape& src, Matrix m)
 {
     for (const Tri& t : src)
@@ -415,7 +436,7 @@ static int gVW = 640, gVH = 360, gPixel = 2;
 static void UpdateCanvas()
 {
     const int w = std::max(1, GetScreenWidth()), h = std::max(1, GetScreenHeight());
-    gPixel = std::max(1, (int)lroundf((float)h / 360.0f));
+    gPixel = std::max(1, std::min((int)lroundf((float)h / 360.0f), w / 480));
     const int vw = (w + gPixel - 1) / gPixel, vh = (h + gPixel - 1) / gPixel;
     if (gCanvas.id != 0 && vw == gVW && vh == gVH) return;
     if (gCanvas.id != 0) UnloadRenderTexture(gCanvas);
@@ -429,8 +450,8 @@ static void UpdateCanvas()
 // Shapes
 // ---------------------------------------------------------------------------
 
-static Shape sCatBody, sCatHead, sCatLeg, sCatTail, sCatTailTip;
-static Shape sLog, sYarn, sWing, sButterflyBody, sBellPost, sBell;
+static Shape sCatBody, sCatHead, sCatEyes, sCatLeg, sCatTail, sCatTailTip;
+static Shape sLog, sYarn, sWing, sButterflyBody, sBellStalk, sBell;
 static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sWindows, sLampPost, sLamp;
 static Shape sSpark, sShadow, sHalo;
 
@@ -452,7 +473,7 @@ static void BuildShapes()
     for (int side = -1; side <= 1; side += 2) {
         AddCone(sCatHead, { -0.04f, 0.20f, side * 0.21f }, 0.15f, 0.30f, 4, fur, kPi / 4);
         AddCone(sCatHead, { 0.0f, 0.22f, side * 0.21f }, 0.085f, 0.19f, 4, pink, kPi / 4);
-        AddBox(sCatHead, { 0.30f, 0.07f, side * 0.17f }, { 0.04f, 0.065f, 0.045f }, ink);
+        AddBox(sCatEyes, { 0.30f, 0.0f, side * 0.17f }, { 0.04f, 0.065f, 0.045f }, ink);   // modelled around eye height
     }
 
     AddBox(sCatLeg, { 0, -0.15f, 0 }, { 0.062f, 0.16f, 0.062f }, fur);
@@ -475,11 +496,17 @@ static void BuildShapes()
     sWing.push_back({ { 0, 0, 0 }, { 0.30f, -0.02f, 0 }, { 0.20f, -0.22f, 0 }, Rgb(170, 225, 250) });
     AddBox(sButterflyBody, { 0, 0.02f, 0 }, { 0.025f, 0.13f, 0.025f }, ink);
 
-    AddBox(sBellPost, { 0, 1.25f, -1.15f }, { 0.05f, 1.25f, 0.05f }, Rgb(150, 112, 90));
-    AddBox(sBellPost, { 0, 2.44f, -0.52f }, { 0.04f, 0.04f, 0.7f }, Rgb(150, 112, 90));
-    AddBox(sBell, { 0, -0.2f, 0 }, { 0.012f, 0.2f, 0.012f }, ink);                       // hangs from its pivot
+    {   // The stalk grows beside the path and bends over it.
+        const Vector3 stem = Rgb(104, 158, 96), leaf = Rgb(132, 190, 110);
+        const Vector3 pts[5] = { { 0, 0, -1.05f }, { 0.03f, 1.25f, -1.02f }, { 0, 2.1f, -0.8f }, { 0, 2.46f, -0.4f }, { 0, 2.42f, 0.0f } };
+        for (int i = 0; i < 4; i++) AddBeam(sBellStalk, pts[i], pts[i + 1], 0.04f - 0.007f * i, stem);
+        AddBlob(sBellStalk, { 0.2f, 0.55f, -1.02f }, { 0.24f, 0.05f, 0.11f }, leaf);
+        AddBlob(sBellStalk, { -0.18f, 0.9f, -1.02f }, { 0.2f, 0.045f, 0.1f }, leaf);
+    }
+    AddBox(sBell, { 0, -0.2f, 0 }, { 0.014f, 0.2f, 0.014f }, Rgb(104, 158, 96));         // hangs from its pivot
     AddCone(sBell, { 0, -0.78f, 0 }, 0.23f, 0.4f, 6, Rgb(250, 214, 92));
     AddBlob(sBell, { 0, -0.82f, 0 }, { 0.06f, 0.06f, 0.06f }, Rgb(190, 140, 60));
+    AddBlob(sBell, { 0, -0.39f, 0 }, { 0.09f, 0.06f, 0.09f }, Rgb(104, 158, 96));
 
     // Scenery. Crowns and flowers are near white so each instance can be tinted.
     AddBox(sTrunk, { 0, 0.4f, 0 }, { 0.11f, 0.42f, 0.11f }, Rgb(126, 92, 76));
@@ -504,7 +531,7 @@ static void BuildShapes()
     sSpark.push_back({ { 0, 0.5f, 0 }, { -0.4f, -0.3f, 0 }, { 0.4f, -0.3f, 0 }, Rgb(255, 255, 255) });
     for (int i = 0; i < 8; i++) {
         const float a0 = 2 * kPi * i / 8, a1 = 2 * kPi * (i + 1) / 8;
-        sShadow.push_back({ { 0, 0, 0 }, { cosf(a1), 0, sinf(a1) * 0.6f }, { cosf(a0), 0, sinf(a0) * 0.6f }, Rgb(20, 16, 40) });
+        sShadow.push_back({ { 0, 0, 0 }, { cosf(a1), 0, sinf(a1) * 0.6f }, { cosf(a0), 0, sinf(a0) * 0.6f }, Rgb(255, 255, 255) });
         sHalo.push_back({ { 0, 0, 0 }, { cosf(a0), sinf(a0), 0 }, { cosf(a1), sinf(a1), 0 }, Rgb(255, 255, 255) });
     }
 }
@@ -990,6 +1017,10 @@ static void DrawSky(float horizonY)
     }
 }
 
+static Camera3D gCamera;
+static float gViewCentre = 0.0f;   // world x at the middle of the screen
+static float gViewHalf = 5.3f;     // half the visible width of the path, in world units
+
 static void EmitGround(Vector3 a, Vector3 b, Vector3 c, Vector3 col)
 {
     // Ground triangles must face up whatever order they were built in.
@@ -999,16 +1030,16 @@ static void EmitGround(Vector3 a, Vector3 b, Vector3 c, Vector3 col)
 
 static void DrawTerrain()
 {
-    static const float rows[] = { 7.0f, 3.6f, 1.0f, -1.0f, -2.6f, -5.0f, -8.0f, -12.0f, -17.0f, -24.0f };
+    static const float rows[] = { 40.0f, 16.0f, 7.0f, 3.6f, 1.0f, -1.0f, -2.6f, -5.0f, -8.0f, -12.0f, -17.0f, -24.0f };
     const int rowCount = (int)(sizeof(rows) / sizeof(rows[0]));
-    const int x0 = (int)floorf(gScene.worldX) - 12, x1 = (int)floorf(gScene.worldX) + 18;
+    const int x0 = (int)floorf(gViewCentre - gViewHalf * 3.5f) - 2, x1 = (int)floorf(gViewCentre + gViewHalf * 3.5f) + 3;
     const Palette& p = gPalette;
     for (int x = x0; x < x1; x++) {
         for (int r = 0; r + 1 < rowCount; r++) {
             const float za = rows[r], zb = rows[r + 1];
             const Vector3 v00 = { (float)x, GroundHeight((float)x, za), za }, v10 = { (float)x + 1, GroundHeight((float)x + 1, za), za };
             const Vector3 v01 = { (float)x, GroundHeight((float)x, zb), zb }, v11 = { (float)x + 1, GroundHeight((float)x + 1, zb), zb };
-            const bool path = r == 2;
+            const bool path = za == 1.0f;
             const float shade = 0.92f + 0.16f * Hash01(x, r);
             const Vector3 base = path ? p.path : Mix(p.grass, Vector3Scale(p.grass, 0.82f), (float)r / rowCount);
             const Vector3 colA = Vector3Scale(base, shade), colB = Vector3Scale(base, shade * (path ? 0.96f : 0.93f));
@@ -1041,7 +1072,7 @@ static void DrawScenery()
     const Vector3 white = { 1, 1, 1 };
     const Vector3 night = Mix(white, Vector3{ 0.7f, 0.8f, 1.0f }, p.stars);   // leaves cool down after dark
     const float spacing = 2.4f;
-    const int s0 = (int)floorf((gScene.worldX - 14.0f) / spacing), s1 = (int)floorf((gScene.worldX + 20.0f) / spacing);
+    const int s0 = (int)floorf((gViewCentre - gViewHalf * 2.7f - 3.0f) / spacing), s1 = (int)floorf((gViewCentre + gViewHalf * 2.7f + 3.0f) / spacing);
 
     for (int s = s0; s <= s1; s++) {
         const float fx = s * spacing;
@@ -1133,6 +1164,10 @@ static void DrawCat(float x, bool walking)
     head = MatrixMultiply(head, MatrixRotateZ(-pitch * 0.55f + 0.05f * sinf(gScene.time * 1.3f)));
     head = MatrixMultiply(head, MatrixTranslate(0.52f, 1.0f + 0.02f * sinf(phase * 2), 0));
     DrawShape(sCatHead, MatrixMultiply(head, root));
+    const bool blinking = fmodf(gScene.time, 3.7f) < 0.12f;
+    const bool pleased = gJudgeKind == J_PERFECT && gJudgeAge < 0.3f;
+    const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.15f : pleased ? 0.4f : 1.0f, 1.0f), MatrixTranslate(0, 0.07f, 0));
+    DrawShape(sCatEyes, MatrixMultiply(MatrixMultiply(eyes, head), root));
 
     for (int i = 0; i < 4; i++) {
         const bool front = i < 2, nearSide = (i & 1) == 0;
@@ -1157,7 +1192,7 @@ static void DrawNotes(double t)
 {
     if (!gChart || !PathFollowsSong()) return;
     const int total = (int)gChart->time.size();
-    const float limit = gScene.worldX + 20.0f;
+    const float limit = gViewCentre + gViewHalf + 4.0f;
     const Vector3 white = { 1, 1, 1 }, dull = { 0.6f, 0.6f, 0.66f };
     for (int i = gTail; i < total; i++) {
         const Vector3 at = NotePosition(i);
@@ -1192,7 +1227,7 @@ static void DrawNotes(double t)
             }
             case ACT_RING: {
                 const Vector3 base = { at.x, PathHeight(at.x), 0 };
-                DrawShape(sBellPost, Place(base), tint);
+                DrawShape(sBellStalk, Place(base), tint);
                 const float swing = hit ? 0.9f * expf(-since * 2.5f) * cosf(since * 14.0f) : 0.08f * sinf(gScene.time * 2 + i) + 0.1f * gScene.beat;
                 const Matrix bell = MatrixMultiply(MatrixRotateZ(swing), MatrixTranslate(base.x, base.y + 2.4f, 0));
                 DrawShape(sBell, bell, tint, hit ? 0.5f + 0.5f * expf(-since * 1.5f) : 0.0f);
@@ -1207,16 +1242,24 @@ static void DrawNotes(double t)
 // Translucent things, drawn last without writing depth.
 static void DrawSparksAndShadows()
 {
-    const Vector3 white = { 1, 1, 1 };
+    const Vector3 shade = { 0.08f, 0.06f, 0.16f };
     const float catX = gScene.worldX;
-    DrawShape(sShadow, Place(Vector3{ catX, PathHeight(catX) + 0.03f, 0 }, 0.7f), white, 1.0f, 0.28f);
+    DrawShape(sShadow, Place(Vector3{ catX, PathHeight(catX) + 0.03f, 0 }, 0.7f), shade, 1.0f, 0.28f);
+
+    // A soft spot of light on the path marks where things should be answered.
+    if (PathFollowsSong()) {
+        const float px = catX + kReach;
+        const Vector3 cream = { 1.0f, 0.97f, 0.88f };
+        DrawShape(sShadow, Place(Vector3{ px, PathHeight(px) + 0.035f, 0 }, 0.5f), cream, 1.0f, 0.22f + 0.25f * gScene.beat);
+        DrawShape(sShadow, Place(Vector3{ px, PathHeight(px) + 0.04f, 0 }, 0.26f), cream, 1.0f, 0.3f + 0.3f * gScene.beat);
+    }
     if (gChart && PathFollowsSong()) {
         const int total = (int)gChart->time.size();
         for (int i = gTail; i < total; i++) {
             const Vector3 at = NotePosition(i);
-            if (at.x > catX + 20.0f) break;
+            if (at.x > gViewCentre + gViewHalf + 4.0f) break;
             if (gNoteState[i] && gNoteAction[i] != ACT_HOP) continue;
-            DrawShape(sShadow, Place(Vector3{ at.x, PathHeight(at.x) + 0.03f, 0 }, gNoteAction[i] == ACT_HOP ? 0.5f : 0.3f), white, 1.0f, 0.22f);
+            DrawShape(sShadow, Place(Vector3{ at.x, PathHeight(at.x) + 0.03f, 0 }, gNoteAction[i] == ACT_HOP ? 0.5f : 0.3f), shade, 1.0f, 0.22f);
         }
     }
     for (int i = 0; i < gHaloCount; i++) {
@@ -1229,7 +1272,7 @@ static void DrawSparksAndShadows()
     const float dark = (gPalette.lamps - 0.3f) / 0.7f;
     if (dark > 0.0f) {
         const float time = gScene.time, spacing = 3.1f;
-        const int s0 = (int)floorf((catX - 10.0f) / spacing), s1 = (int)floorf((catX + 16.0f) / spacing);
+        const int s0 = (int)floorf((gViewCentre - gViewHalf * 1.6f) / spacing), s1 = (int)floorf((gViewCentre + gViewHalf * 1.6f) / spacing);
         for (int s = s0; s <= s1; s++) {
             for (int k = 0; k < 2; k++) {
                 const float phase = Hash01(s, 80 + k) * 6.283f;
@@ -1250,7 +1293,6 @@ static void DrawSparksAndShadows()
     }
 }
 
-static Camera3D gCamera;
 
 static void RenderWorld(double t)
 {
@@ -1258,8 +1300,12 @@ static void RenderWorld(double t)
     gPalette = PaletteAt(s.day);
     gHaloCount = 0;
 
-    gCamera.position = Vector3{ s.worldX + 2.5f, s.camY + 2.6f, 9.8f };
-    gCamera.target = Vector3{ s.worldX + 2.5f, s.camY + 1.3f, 0.0f };
+    const float aspect = (float)gVW / (float)gVH, tanHalf = 0.3057f;   // tan(34 deg / 2)
+    const float dist = std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
+    gViewHalf = dist * tanHalf * aspect;
+    gViewCentre = s.worldX + gViewHalf * 0.47f;                        // keeps the cat a quarter of the way in
+    gCamera.position = Vector3{ gViewCentre, s.camY + 1.3f + 1.3f * dist / 9.8f, dist };
+    gCamera.target = Vector3{ gViewCentre, s.camY + 1.3f, 0.0f };
     gCamera.up = Vector3{ 0, 1, 0 };
     gCamera.fovy = 34.0f;
     gCamera.projection = CAMERA_PERSPECTIVE;
@@ -1269,6 +1315,8 @@ static void RenderWorld(double t)
     gLight.sun = gPalette.sun;
     gLight.ambient = gPalette.ambient;
     gLight.fog = Mix(gPalette.skyBottom, gPalette.skyTop, 0.12f);
+    gLight.fogStart = dist + 6.0f;
+    gLight.fogEnd = dist + 30.0f;
 
     // Where the far edge of the ground meets the sky on the canvas.
     const float horizonY = GetWorldToScreenEx(Vector3{ gCamera.target.x, s.camY + 2.3f, -24.0f }, gCamera, gVW, gVH).y;
@@ -1485,7 +1533,7 @@ static void DrawHud(double t)
         for (int i = gHead; i < total; i++) {
             if (gNoteState[i]) continue;
             Vector3 at = NotePosition(i);
-            if (at.x > gScene.worldX + 8.6f) break;
+            if (at.x > gViewCentre + gViewHalf + 0.5f) break;
             at.y += gNoteAction[i] == ACT_RING ? 1.0f : 0.45f;
             const Vector2 p = GetWorldToScreenEx(at, gCamera, gVW, gVH);
             const int x = (int)p.x, y = (int)p.y - 14;

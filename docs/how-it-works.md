@@ -66,7 +66,8 @@ The renderer is deliberately small.
 
 - A **shape** is a list of triangles with one colour each. Shapes are built in code from boxes, cones, cylinders and stretched icosahedra; there are no model or texture files.
 - Each frame, every visible triangle is transformed on the CPU, lit with one directional light plus a sky-tinted ambient term, fogged by distance, and sent to raylib's batch with the final colour baked in. That is a few thousand triangles, which costs next to nothing and needs no custom shader.
-- The frame is drawn into a canvas about 360 pixels tall and scaled up by a whole number of pixels, which gives the chunky look and keeps the fill cost tiny on any GPU.
+- The frame is drawn into a canvas about 360 pixels tall (never narrower than 480) and scaled up by a whole number of pixels, which gives the chunky look and keeps the fill cost tiny on any GPU.
+- The camera adapts to the window shape: in narrow windows it pulls back so the same stretch of path stays visible ahead of the cat.
 - Sky, sun, moon, stars, clouds and far hills are flat 2D shapes behind the 3D scene. Lamps, lit windows and fireflies are translucent discs blended on top.
 - The time of day is a palette interpolated between four keys (afternoon, sunset, dusk, night) by the song's progress.
 - Scenery is placed by hashing the position along the path, so the same song always produces the same walk.
@@ -76,4 +77,4 @@ The renderer is deliberately small.
 Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--size WxH]` renders offscreen with a simulated clock, in watch mode, and saves one frame.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
