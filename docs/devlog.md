@@ -2,6 +2,25 @@
 
 Newest entries first.
 
+## 2026-11-13: places, a camera that reacts, and a song shelf
+
+Three requests in one go.
+
+**A dynamic camera and more impact.** The camera now sits on four springs (sideways, vertical, roll, zoom) and each action kicks them differently, so a hop, a bat, a swat and a bell each feel distinct through the camera alone. Hits also throw 2D streaks out from where they landed, burst a ring towards the viewer and tint the edges of the frame in the action's colour. Everything is short and small on purpose: the largest motion is about a tenth of a world unit and under two degrees, and it is over in a quarter of a second, so the path stays readable.
+
+**Five places.** Meadow, blossom garden, autumn woods, snowy village and seaside. Each is a ground colour, a sky tint, a prop mix per depth band and a weather layer; the seaside also reshapes the terrain into a beach and a sea. A song is a journey through them by default, starting somewhere chosen by its name, or it can stay in one. The menus walk through all five in the background.
+
+Two things learned while building them:
+
+- Reusing the meadow's day-to-night palette as a plain multiplier turned snow bright violet at night. Keeping the darkening but only part of the colour cast fixed it for every place at once.
+- Palms were first placed where trees go in the other places and ended up crossing the play area. Props that lean need to sit further back than props that stand straight.
+
+**A song shelf.** Every song opened is remembered with its length and best rank, and the main menu became a shelf to pick from, beside a title whose O has cat ears. The whole interface moved from dark translucent panels to cream paper cards with cocoa text, buttons that lift under the pointer, and a paw-print loading indicator.
+
+The screenshot mode gained `--scenery` and fills the shelf with sample entries, so none of this needs a real library to check.
+
+Still unverified by a person: all of the above in real time, with real audio.
+
 ## 2026-11-13: sound, and a world that gets happier
 
 Two requests: hit sounds that feel very satisfying but stay cozy, and a visible reward for every perfect hit that keeps growing for as long as the streak lasts.

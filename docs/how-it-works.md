@@ -72,6 +72,26 @@ The renderer is deliberately small.
 - The time of day is a palette interpolated between four keys (afternoon, sunset, dusk, night) by the song's progress.
 - Scenery is placed by hashing the position along the path, so the same song always produces the same walk.
 
+## Places
+
+A place (biome) is a small set of choices: ground and path colour, a sky tint, which props grow in each of four depth bands (beside the path, middle distance, far away, in front), and a flat 2D weather layer (snow, petals, leaves, seagulls).
+
+`BiomeAt(x)` answers "where are we at world position x" as a blend between two places. During a song the path is divided into equal stretches, one per roughly thirty seconds of music up to five; the first place comes from a hash of the song's name and each next one is two steps further round the list, which visits all five and never puts similar places side by side. The last nine units of a stretch blend into the next: ground colours interpolate, props switch at the midpoint. In the menus the same function runs on the idle walk, so the background strolls through every place.
+
+The time of day is applied on top as a shading factor, so every place goes from afternoon to night without needing its own palette keys. Only part of the palette's colour cast is used for that factor, otherwise pale ground such as snow turns violet at night.
+
+The seaside is the one place that changes the terrain: behind the path the ground runs down to a fixed sea level, and the rows beyond the shoreline are drawn as water with bands of lighter colour drifting across.
+
+## Camera
+
+The camera rests a quarter of the view ahead of the cat. Four spring-damped values sit on top of that rest pose: sideways, vertical, roll and zoom. A hit adds velocity to them depending on the action (up for a hop, forward and in for a bat, up and tilted for a swat, a roll for a bell), scaled by how accurate the hit was, and the springs bring them back in about a quarter of a second. They are integrated in four sub-steps per frame so a slow frame cannot make them unstable. A milestone adds a larger zoom kick, a miss a small wobble. The camera also zooms a fraction of a degree on each kick drum and drifts slowly once the streak is high.
+
+Screen-space effects are drawn after the 3D pass: streaks radiating from the projected hit position, and four gradients along the edges of the canvas in the action's colour.
+
+## Song library
+
+`oniria.songs`, next to the executable, holds one tab-separated line per song: path, name, length, and best accuracy and score for each difficulty. A song moves to the top when it is loaded. Results are only recorded when a person played (not in watch mode). The built-in track has an entry too, under a placeholder key.
+
 ## Sound effects
 
 `src/sfx.cpp` builds eight short sounds at startup from decaying sine partials: a marimba bar, a pitch-sliding "bloop", a kalimba tine, a small bell with two detuned fundamentals, a two-note music-box twinkle, a muted thud for misses, a music-box arpeggio for milestones and a menu tick. Each one goes through a low-pass filter around 5.5 kHz and gets a quiet, darker two-tap echo, which is what keeps them soft.
@@ -98,4 +118,4 @@ Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.

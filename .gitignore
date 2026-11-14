@@ -8,8 +8,9 @@
 # Downloaded dependencies (see scripts/fetch_raylib.ps1)
 /third_party/
 
-# Local game settings and test screenshots
+# Local game settings, song library and test screenshots
 oniria.cfg
+oniria.songs
 /shots/
 
 # Editors and tools

@@ -1,14 +1,16 @@
 # ONIRIA
 
-A cozy, low-poly rhythm game. Give it a song and a cat takes a walk along a path built from that song: every beat puts something on the path to play with, and the afternoon turns into night by the time the music ends.
+A cozy, low-poly rhythm game. Give it a song and a cat takes a walk along a path built from that song: every beat puts something on the path to play with, the walk passes through meadows, gardens, woods, snow and seaside, and the afternoon turns into night by the time the music ends.
 
 Native C++ with [raylib](https://www.raylib.com/). Open source under the MIT license.
 
-![A long streak at sunset](docs/img/sunset.png)
+![The song shelf](docs/img/menu.png)
 
-| Afternoon | Night |
+| Blossom garden | Seaside |
 | --- | --- |
-| ![Afternoon](docs/img/afternoon.png) | ![Night](docs/img/night.png) |
+| ![Blossom garden](docs/img/blossom.png) | ![Seaside](docs/img/seaside.png) |
+| **Autumn woods** | **Snowy village** |
+| ![Autumn woods](docs/img/autumn.png) | ![Snowy village](docs/img/snow.png) |
 
 > **Status: first prototype.** The whole loop works (load a song, play, results), but it has only been checked with automated runs so far. See [what is verified](#what-is-verified-so-far).
 
@@ -32,6 +34,20 @@ Every hit in a row makes the walk happier, and a miss calms it back down:
 - A **perfect** hit always gets a twinkle, a burst of stars, a ring of light on the path and two new flowers.
 - As the streak grows the cat prances, blushes and gives off hearts, flowers spring up ahead of it, the trees dance harder, lamps come on, soft lights and petals drift through the sky, and eventually a rainbow comes out.
 - The five hearts under the score show the current mood. Streaks of 10, 25, 50 and 100 get a banner and a little fanfare.
+
+### Camera and impact
+
+Every hit moves the camera in its own way: it bounces with a hop, lunges with a bat, tips with a swat and sways with a bell, then settles within a quarter of a second. It also breathes with the kick drum and leans in for streak milestones. On screen each hit throws out streaks from where it landed, a ring bursts towards you, and the edges of the frame glow in the colour of that action. Bells send out rings of sound, hops kick up dust.
+
+### Places
+
+The walk passes through five places, each with its own ground, plants, props and weather: a **meadow**, a **blossom garden** with stone lanterns and bamboo, **autumn woods** with pumpkins and falling leaves, a **snowy village** with cabins and snowmen, and the **seaside** with palms, sandcastles and boats.
+
+By default a song is a journey: it starts in a place picked by the song's name and moves on roughly every half minute, blending from one to the next. The song screen lets you stay in a single place instead.
+
+### Your songs
+
+Every song you open is remembered on the shelf in the main menu, most recent first, with its length and your best rank. Click one (or use the arrow keys and Enter) to play it again; Delete forgets it without touching the file. The list lives in `oniria.songs` next to the executable.
 
 ### Sound
 

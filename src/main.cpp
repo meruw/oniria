@@ -70,6 +70,7 @@ struct Settings {
     bool  watch    = false;   // the cat plays by itself
     bool  hints    = true;    // show the key above each object
     int   sfx      = 7;       // sound effects volume, 0..10
+    int   scenery  = 0;       // 0 = a journey through every place, 1.. = stay in one
 };
 static Settings gCfg;
 
@@ -88,6 +89,7 @@ static void LoadSettings()
         else if (!strcmp(key, "watch")) gCfg.watch = v != 0.0f;
         else if (!strcmp(key, "hints")) gCfg.hints = v != 0.0f;
         else if (!strcmp(key, "sfx")) gCfg.sfx = std::clamp((int)v, 0, 10);
+        else if (!strcmp(key, "scenery")) gCfg.scenery = std::clamp((int)v, 0, 5);
     }
     fclose(f);
 }
@@ -96,9 +98,91 @@ static void SaveSettings()
 {
     FILE* f = fopen(ConfigPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\n",
-            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx);
+    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\nscenery=%d\n",
+            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx, gCfg.scenery);
     fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+// Song library
+// ---------------------------------------------------------------------------
+// Every song that has been opened is remembered, most recent first, with the
+// best result on each difficulty. Stored as tab-separated lines next to the
+// executable.
+
+struct SongEntry {
+    std::string path, name;
+    float duration = 0.0f;
+    float best[DIFF_COUNT] = { -1.0f, -1.0f, -1.0f };   // best accuracy, -1 if never finished
+    int   score[DIFF_COUNT] = {};
+};
+static std::vector<SongEntry> gLibrary;
+static const char* const kDemoKey = "<demo>";   // stands in for a path on the built-in track
+
+static std::string LibraryPath() { return std::string(GetApplicationDirectory()) + "oniria.songs"; }
+
+static SongEntry* FindSong(const std::string& path)
+{
+    for (SongEntry& e : gLibrary) if (e.path == path) return &e;
+    return nullptr;
+}
+
+static void LoadLibrary()
+{
+    gLibrary.clear();
+    if (FILE* f = fopen(LibraryPath().c_str(), "rb")) {
+        char line[4096];
+        while (fgets(line, sizeof(line), f)) {
+            std::vector<std::string> cols(1);
+            for (const char* c = line; *c && *c != '\n' && *c != '\r'; c++) {
+                if (*c == '\t') cols.emplace_back(); else cols.back() += *c;
+            }
+            if (cols.size() < 3 || cols[0].empty()) continue;
+            SongEntry e;
+            e.path = cols[0];
+            e.name = cols[1];
+            e.duration = (float)atof(cols[2].c_str());
+            for (int d = 0; d < DIFF_COUNT; d++) {
+                if (cols.size() > (size_t)(3 + d)) e.best[d] = (float)atof(cols[3 + d].c_str());
+                if (cols.size() > (size_t)(6 + d)) e.score[d] = atoi(cols[6 + d].c_str());
+            }
+            gLibrary.push_back(e);
+        }
+        fclose(f);
+    }
+    if (!FindSong(kDemoKey)) {
+        SongEntry demo;
+        demo.path = kDemoKey;
+        demo.name = "Demo track";
+        demo.duration = 49.0f;
+        gLibrary.push_back(demo);
+    }
+}
+
+static void SaveLibrary()
+{
+    FILE* f = fopen(LibraryPath().c_str(), "wb");
+    if (!f) return;
+    for (const SongEntry& e : gLibrary)
+        fprintf(f, "%s\t%s\t%.1f\t%.4f\t%.4f\t%.4f\t%d\t%d\t%d\n", e.path.c_str(), e.name.c_str(), e.duration,
+                e.best[0], e.best[1], e.best[2], e.score[0], e.score[1], e.score[2]);
+    fclose(f);
+}
+
+// Moves a song to the top of the library, adding it if it is new.
+static void RememberSong(const std::string& path, const std::string& name, float duration)
+{
+    SongEntry entry;
+    if (SongEntry* old = FindSong(path)) {
+        entry = *old;
+        gLibrary.erase(gLibrary.begin() + (old - gLibrary.data()));
+    }
+    entry.path = path;
+    entry.name = name;
+    entry.duration = duration;
+    gLibrary.insert(gLibrary.begin(), entry);
+    if (gLibrary.size() > 60) gLibrary.resize(60);
+    SaveLibrary();
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +326,9 @@ static void PlaySfx(int sound, float semitones = 0.0f, float gain = 1.0f)
 
 static SongAnalysis gSong;
 static std::string  gSongName;
+static std::string  gSongPath;            // library key of the loaded song
+static int   gMenuSel = 0, gMenuScroll = 0;
+static bool  gNewBest = false;
 static std::string  gError;
 static std::vector<float> gPathHeights;   // one sample every 0.5 s of song
 
@@ -285,7 +372,7 @@ struct LoadJob {
     std::thread thread;
     std::atomic<int> stage{ 0 };   // 0 idle, 1 decoding, 2 analyzing, 3 finished
     bool ok = false;
-    std::string error, name;
+    std::string error, name, path;
     std::vector<int16_t> pcm;
     int sampleRate = 0;
     SongAnalysis song;
@@ -306,17 +393,40 @@ struct Scene {
 };
 static Scene gScene;
 
-enum SparkKind { SPARK_SHARD, SPARK_STAR, SPARK_HEART };
+enum SparkKind { SPARK_SHARD, SPARK_STAR, SPARK_HEART, SPARK_PUFF };
 struct Spark { Vector3 pos, vel, col; float life, span, size, gravity; int kind; };
 const int kSparkCount = 192;
 static Spark gSparks[kSparkCount];
 static int   gNextSpark = 0;
 
-// Rings of light that spread on the path where a perfect hit landed.
-struct Ring { Vector3 pos; float age; };
-const int kRingCount = 8;
+// Rings of light: flat ones spread on the path, upright ones burst towards the
+// camera. A negative age is a delay before the ring appears.
+struct Ring { Vector3 pos; float age, life, size; Vector3 col; bool upright; };
+const int kRingCount = 24;
 static Ring gRings[kRingCount];
 static int  gNextRing = 0;
+
+// A hit seen from the screen's point of view: a burst of streaks, drawn in 2D.
+struct Impact { Vector3 pos; float age = 9.0f; int action = 0, judge = 0; };
+const int kImpactCount = 8;
+static Impact gImpacts[kImpactCount];
+static int    gNextImpact = 0;
+static Vector3 gEdgeColour = { 1, 1, 1 };   // the screen's edges glow in the colour of the last hit
+static float   gEdgePower = 0.0f;
+
+// The camera sits on springs. Every hit kicks it in a way that suits the
+// action, and it settles again within about a quarter of a second.
+struct CameraRig {
+    float x = 0, y = 0, roll = 0, zoom = 0;         // offsets from the resting camera (units, units, radians, degrees)
+    float vx = 0, vy = 0, vroll = 0, vzoom = 0;
+    int   flip = 1;                                  // alternates so rolls go left, right, left
+};
+static CameraRig gRig;
+
+static void KickCamera(float x, float y, float roll, float zoom)
+{
+    gRig.vx += x; gRig.vy += y; gRig.vroll += roll; gRig.vzoom += zoom;
+}
 
 // Flowers that bloom because of how you are playing.
 struct Bloom { float x, z, born; int tint; float size; };
@@ -474,6 +584,7 @@ struct Lighting {
 };
 static Lighting gLight;
 static Palette  gPalette;
+static Vector3  gShadeGrass = { 1, 1, 1 }, gShadePath = { 1, 1, 1 };   // how the time of day darkens the ground
 
 // Emits one lit, fogged triangle. `glow` 1 ignores lighting (lamps, sparks).
 static void EmitTri(Vector3 a, Vector3 b, Vector3 c, Vector3 col, float glow = 0.0f, float alpha = 1.0f)
@@ -523,7 +634,7 @@ static int gVW = 640, gVH = 360, gPixel = 2;
 static void UpdateCanvas()
 {
     const int w = std::max(1, GetScreenWidth()), h = std::max(1, GetScreenHeight());
-    gPixel = std::max(1, std::min((int)lroundf((float)h / 360.0f), w / 480));
+    gPixel = std::max(1, std::min(h / 340, w / 480));   // the canvas is at least 480 x 340, so every panel fits
     const int vw = (w + gPixel - 1) / gPixel, vh = (h + gPixel - 1) / gPixel;
     if (gCanvas.id != 0 && vw == gVW && vh == gVH) return;
     if (gCanvas.id != 0) UnloadRenderTexture(gCanvas);
@@ -540,7 +651,9 @@ static void UpdateCanvas()
 static Shape sCatBody, sCatHead, sCatEyes, sCatLeg, sCatTail, sCatTailTip;
 static Shape sLog, sYarn, sWing, sButterflyBody, sBellStalk, sBell;
 static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sWindows, sLampPost, sLamp;
-static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sCatBlush;
+static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sRingUp, sCatBlush;
+static Shape sRoof, sSnowCap, sSnowman, sPumpkin, sStump, sLeafPile, sHay, sStoneLantern, sLanternGlow, sBamboo, sGate;
+static Shape sPalmTrunk, sPalmLeaves, sUmbrella, sShell, sCastle, sBoat;
 
 static const Vector3 kActionColor[ACT_COUNT] = { { 0.93f, 0.62f, 0.33f }, { 0.95f, 0.45f, 0.56f }, { 0.45f, 0.78f, 0.95f }, { 0.98f, 0.84f, 0.36f } };
 
@@ -608,7 +721,7 @@ static void BuildShapes()
     AddCone(sMushroom, { 0, 0.16f, 0 }, 0.15f, 0.14f, 6, Rgb(226, 96, 86));
 
     AddBox(sHouse, { 0, 0.6f, 0 }, { 0.95f, 0.6f, 0.75f }, Rgb(244, 226, 198));
-    AddCone(sHouse, { 0, 1.2f, 0 }, 1.45f, 0.85f, 4, Rgb(204, 108, 92), kPi / 4);
+    AddCone(sRoof, { 0, 1.2f, 0 }, 1.45f, 0.85f, 4, Rgb(255, 255, 255), kPi / 4);   // tinted per place: tiles, or snow
     AddBox(sHouse, { 0.5f, 1.65f, -0.2f }, { 0.12f, 0.3f, 0.12f }, Rgb(168, 130, 120));
     AddBox(sHouse, { -0.45f, 0.36f, 0.76f }, { 0.16f, 0.36f, 0.02f }, Rgb(140, 96, 76));
     AddBox(sWindows, { 0.3f, 0.7f, 0.76f }, { 0.2f, 0.17f, 0.02f }, Rgb(255, 222, 140));
@@ -643,6 +756,108 @@ static void BuildShapes()
     }
     for (int side = -1; side <= 1; side += 2)
         AddBox(sCatBlush, { 0.27f, -0.07f, side * 0.24f }, { 0.035f, 0.04f, 0.05f }, Rgb(255, 150, 165));
+    for (int i = 0; i < 14; i++) {
+        const float a0 = 2 * kPi * i / 14, a1 = 2 * kPi * (i + 1) / 14;
+        const Vector3 o0 = { cosf(a0), sinf(a0), 0 }, o1 = { cosf(a1), sinf(a1), 0 };
+        sRingUp.push_back({ o0, o1, Vector3Scale(o1, 0.82f), Rgb(255, 255, 255) });
+        sRingUp.push_back({ o0, Vector3Scale(o1, 0.82f), Vector3Scale(o0, 0.82f), Rgb(255, 255, 255) });
+    }
+
+    // --- Snowy village -----------------------------------------------------
+    const Vector3 snow = Rgb(250, 252, 255), wood = Rgb(126, 92, 76);
+    for (int i = 0; i < 3; i++)   // sits on the upper part of each pine tier
+        AddCone(sSnowCap, { 0, 0.92f + i * 0.55f, 0 }, (0.75f - i * 0.18f) * 0.58f, 0.5f, 6, snow, i * 0.5f);
+    AddBlob(sSnowman, { 0, 0.30f, 0 }, { 0.34f, 0.32f, 0.34f }, snow);
+    AddBlob(sSnowman, { 0, 0.78f, 0 }, { 0.25f, 0.24f, 0.25f }, snow);
+    AddBlob(sSnowman, { 0, 1.13f, 0 }, { 0.18f, 0.18f, 0.18f }, snow);
+    AddBox(sSnowman, { 0.20f, 1.13f, 0.05f }, { 0.07f, 0.025f, 0.025f }, Rgb(244, 150, 70));
+    AddBox(sSnowman, { 0.15f, 1.19f, 0.10f }, { 0.02f, 0.025f, 0.02f }, ink);
+    AddBox(sSnowman, { 0.16f, 1.19f, -0.04f }, { 0.02f, 0.025f, 0.02f }, ink);
+    AddBox(sSnowman, { 0, 1.30f, 0 }, { 0.17f, 0.015f, 0.17f }, ink);
+    AddBox(sSnowman, { 0, 1.39f, 0 }, { 0.11f, 0.08f, 0.11f }, ink);
+    AddBeam(sSnowman, { 0.15f, 0.82f, 0.18f }, { 0.40f, 1.00f, 0.42f }, 0.018f, wood);
+    AddBeam(sSnowman, { 0.0f, 0.82f, -0.20f }, { -0.10f, 1.02f, -0.48f }, 0.018f, wood);
+
+    // --- Autumn woods ------------------------------------------------------
+    AddBlob(sPumpkin, { 0, 0.20f, 0 }, { 0.30f, 0.22f, 0.30f }, Rgb(238, 140, 60));
+    AddBox(sPumpkin, { 0.02f, 0.44f, 0 }, { 0.03f, 0.05f, 0.03f }, Rgb(110, 150, 90));
+    AddCylinder(sStump, { 0, 0, 0 }, 0.26f, 0.32f, 6, Rgb(140, 100, 78), Rgb(222, 190, 146));
+    AddBlob(sLeafPile, { 0, 0.07f, 0 }, { 0.42f, 0.10f, 0.34f }, Rgb(255, 255, 255));
+    AddCylinder(sHay, { 0, 0, 0 }, 0.5f, 0.7f, 8, Rgb(232, 200, 110), Rgb(214, 178, 96));
+
+    // --- Blossom garden ----------------------------------------------------
+    const Vector3 stone = Rgb(176, 172, 184), stoneDark = Rgb(140, 136, 152);
+    AddBox(sStoneLantern, { 0, 0.09f, 0 }, { 0.20f, 0.09f, 0.20f }, stone);
+    AddBox(sStoneLantern, { 0, 0.42f, 0 }, { 0.08f, 0.24f, 0.08f }, stone);
+    AddBox(sStoneLantern, { 0, 0.70f, 0 }, { 0.22f, 0.05f, 0.22f }, stoneDark);
+    AddCone(sStoneLantern, { 0, 1.00f, 0 }, 0.34f, 0.22f, 4, stoneDark, kPi / 4);
+    AddBox(sLanternGlow, { 0, 0.88f, 0 }, { 0.13f, 0.12f, 0.13f }, Rgb(255, 226, 150));
+    {
+        const Vector3 cane = Rgb(120, 176, 96), leaf = Rgb(156, 204, 116);
+        const Vector3 canes[3][2] = { { { -0.15f, 0, 0 }, { -0.22f, 2.6f, 0.05f } }, { { 0.05f, 0, 0.1f }, { 0.10f, 3.0f, 0.1f } }, { { 0.2f, 0, -0.05f }, { 0.34f, 2.3f, -0.05f } } };
+        for (int i = 0; i < 3; i++) {
+            AddBeam(sBamboo, canes[i][0], canes[i][1], 0.035f, cane);
+            AddBlob(sBamboo, Vector3{ canes[i][1].x + 0.12f, canes[i][1].y - 0.1f, canes[i][1].z }, { 0.30f, 0.06f, 0.12f }, leaf);
+            AddBlob(sBamboo, Vector3{ canes[i][1].x - 0.10f, canes[i][1].y - 0.5f, canes[i][1].z + 0.05f }, { 0.24f, 0.05f, 0.10f }, leaf);
+        }
+    }
+    {
+        const Vector3 red = Rgb(214, 86, 74);
+        AddBox(sGate, { -0.9f, 1.0f, 0 }, { 0.09f, 1.0f, 0.09f }, red);
+        AddBox(sGate, { 0.9f, 1.0f, 0 }, { 0.09f, 1.0f, 0.09f }, red);
+        AddBox(sGate, { 0, 1.70f, 0 }, { 1.0f, 0.06f, 0.08f }, red);
+        AddBox(sGate, { 0, 2.05f, 0 }, { 1.25f, 0.08f, 0.10f }, red);
+        AddBox(sGate, { 0, 2.17f, 0 }, { 1.36f, 0.04f, 0.14f }, Rgb(90, 60, 70));
+    }
+
+    // --- Seaside -----------------------------------------------------------
+    {
+        const Vector3 bark = Rgb(170, 130, 96);
+        const Vector3 spine[4] = { { 0, 0, 0 }, { 0.12f, 0.8f, 0 }, { 0.30f, 1.6f, 0 }, { 0.55f, 2.4f, 0 } };
+        for (int i = 0; i < 3; i++) AddBeam(sPalmTrunk, spine[i], spine[i + 1], 0.10f - 0.015f * i, bark);
+        AddBlob(sPalmTrunk, { 0.50f, 2.30f, 0.10f }, { 0.08f, 0.08f, 0.08f }, Rgb(120, 86, 70));
+        const Vector3 top = spine[3];
+        for (int i = 0; i < 7; i++) {   // drooping fronds
+            const float a = 2 * kPi * i / 7;
+            const Vector3 dir = { cosf(a), 0, sinf(a) }, side = { -sinf(a) * 0.14f, 0, cosf(a) * 0.14f };
+            const Vector3 mid = { top.x + dir.x * 0.65f, top.y + 0.12f, top.z + dir.z * 0.65f };
+            const Vector3 tip = { top.x + dir.x * 1.3f, top.y - 0.45f, top.z + dir.z * 1.3f };
+            sPalmLeaves.push_back({ top, Vector3Add(mid, side), Vector3Subtract(mid, side), Rgb(255, 255, 255) });
+            sPalmLeaves.push_back({ Vector3Add(mid, side), tip, Vector3Subtract(mid, side), Rgb(232, 232, 232) });
+        }
+    }
+    {
+        AddBeam(sUmbrella, { 0, 0, 0 }, { 0.15f, 1.5f, 0 }, 0.02f, Rgb(255, 250, 240));
+        const size_t from = sUmbrella.size();
+        const Vector3 top = { 0.15f, 1.62f, 0 };
+        for (int i = 0; i < 8; i++) {
+            const float a0 = 2 * kPi * i / 8, a1 = 2 * kPi * (i + 1) / 8;
+            sUmbrella.push_back({ { 0.15f + cosf(a0) * 0.8f, 1.27f, sinf(a0) * 0.8f }, { 0.15f + cosf(a1) * 0.8f, 1.27f, sinf(a1) * 0.8f }, top,
+                                  (i & 1) ? Rgb(255, 246, 230) : Rgb(238, 112, 112) });
+        }
+        Orient(sUmbrella, from, Vector3{ 0.15f, 1.3f, 0 });
+    }
+    for (int i = 0; i < 10; i++) {   // a starfish lying on the sand; tinted when drawn
+        const float a0 = kPi / 2 + i * kPi / 5, a1 = kPi / 2 + (i + 1) * kPi / 5;
+        const float r0 = ((i & 1) ? 0.45f : 1.0f) * 0.22f, r1 = ((i & 1) ? 1.0f : 0.45f) * 0.22f;
+        sShell.push_back({ { 0, 0.05f, 0 }, { cosf(a0) * r0, 0.02f, sinf(a0) * r0 }, { cosf(a1) * r1, 0.02f, sinf(a1) * r1 }, Rgb(255, 255, 255) });
+    }
+    Orient(sShell, 0, Vector3{ 0, -1, 0 });
+    {
+        const Vector3 sand = Rgb(226, 200, 140), sandLight = Rgb(240, 218, 164);
+        AddBox(sCastle, { 0, 0.13f, 0 }, { 0.34f, 0.13f, 0.28f }, sand);
+        AddBox(sCastle, { 0, 0.33f, 0 }, { 0.16f, 0.10f, 0.14f }, sandLight);
+        for (int i = 0; i < 4; i++) {
+            const float x = (i & 1) ? 0.3f : -0.3f, z = (i & 2) ? 0.24f : -0.24f;
+            AddCylinder(sCastle, { x, 0, z }, 0.10f, 0.42f, 6, sand, sandLight);
+            AddCone(sCastle, { x, 0.42f, z }, 0.13f, 0.16f, 6, sandLight);
+        }
+    }
+    AddBox(sBoat, { 0, 0.10f, 0 }, { 0.6f, 0.14f, 0.22f }, Rgb(168, 116, 96));
+    AddBox(sBoat, { 0, 0.26f, 0 }, { 0.64f, 0.03f, 0.25f }, Rgb(250, 240, 226));
+    AddBeam(sBoat, { 0, 0.2f, 0 }, { 0, 1.5f, 0 }, 0.025f, wood);
+    sBoat.push_back({ { 0.05f, 0.42f, 0 }, { 0.05f, 1.45f, 0 }, { 0.78f, 0.46f, 0 }, Rgb(255, 252, 244) });
+    sBoat.push_back({ { -0.05f, 0.50f, 0 }, { -0.50f, 0.52f, 0 }, { -0.05f, 1.20f, 0 }, Rgb(250, 190, 170) });
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +889,62 @@ static Palette PaletteAt(float day)
 
 static bool PathFollowsSong() { return gState == ST_PLAYING || gState == ST_PAUSED || gState == ST_COUNTDOWN; }
 
+// ---------------------------------------------------------------------------
+// Places
+// ---------------------------------------------------------------------------
+// The walk passes through five places. During a song it starts in one chosen
+// by the song's name and moves on every half minute or so; the menus stroll
+// through all of them. Each place has its own ground, plants, props and weather.
+
+enum Biome { BIOME_MEADOW, BIOME_BLOSSOM, BIOME_AUTUMN, BIOME_SNOW, BIOME_SEASIDE, BIOME_COUNT };
+static const char* kBiomeName[BIOME_COUNT] = { "Meadow", "Blossom garden", "Autumn woods", "Snowy village", "Seaside" };
+static const float kSeaLevel = -0.35f;
+
+struct BiomeLook { Vector3 grass, path, sky; float skyMix; };
+
+static BiomeLook LookOf(int biome)
+{
+    switch (biome) {
+        case BIOME_BLOSSOM: return { Rgb(142, 200, 150), Rgb(228, 216, 200), Rgb(255, 206, 226), 0.20f };
+        case BIOME_AUTUMN:  return { Rgb(198, 172, 98), Rgb(216, 172, 122), Rgb(255, 200, 140), 0.16f };
+        case BIOME_SNOW:    return { Rgb(238, 244, 252), Rgb(204, 220, 240), Rgb(214, 226, 244), 0.34f };
+        case BIOME_SEASIDE: return { Rgb(242, 224, 172), Rgb(200, 164, 124), Rgb(140, 224, 232), 0.20f };
+        default:            return { Rgb(140, 196, 110), Rgb(232, 206, 160), Rgb(255, 255, 255), 0.0f };
+    }
+}
+
+struct BiomeMix { int a, b; float t; };   // somewhere between place `a` and place `b`
+
+static int   gFirstBiome = 0;        // where the current song's journey starts
+static float gBiomeSpan = 150.0f;    // world units spent in each place during a song
+
+static BiomeMix BiomeAt(float x)
+{
+    const bool song = PathFollowsSong();
+    if (song && gCfg.scenery > 0) return BiomeMix{ gCfg.scenery - 1, gCfg.scenery - 1, 0.0f };
+    const float span = song ? gBiomeSpan : 60.0f;
+    const float f = std::max(0.0f, x) / span;
+    const int stop = (int)floorf(f), first = song ? gFirstBiome : 0;
+    // Stepping by two visits all five before repeating, and never puts similar places side by side.
+    const int a = (first + stop * 2) % BIOME_COUNT, b = (first + (stop + 1) * 2) % BIOME_COUNT;
+    const float edge = 9.0f / span;   // the last nine units blend into the next place
+    float t = std::clamp((f - (float)stop - (1.0f - edge)) / edge, 0.0f, 1.0f);
+    t = t * t * (3.0f - 2.0f * t);
+    return BiomeMix{ a, b, t };
+}
+
+static float BiomeWeight(const BiomeMix& m, int biome) { return (m.a == biome ? 1.0f - m.t : 0.0f) + (m.b == biome ? m.t : 0.0f); }
+static int   BiomeNear(float x) { const BiomeMix m = BiomeAt(x); return m.t < 0.5f ? m.a : m.b; }
+
+// Ground colours at world x: the place decides the hue, the time of day the shading.
+static void GroundColours(float x, Vector3& grass, Vector3& path)
+{
+    const BiomeMix m = BiomeAt(x);
+    const BiomeLook a = LookOf(m.a), b = LookOf(m.b);
+    grass = Vector3Multiply(Mix(a.grass, b.grass, m.t), gShadeGrass);
+    path = Vector3Multiply(Mix(a.path, b.path, m.t), gShadePath);
+}
+
 // Height of the path at world x. During a song the hills are the song's
 // loudness: quiet passages are valleys, loud ones are hilltops.
 static float PathHeight(float x)
@@ -690,10 +961,22 @@ static float PathHeight(float x)
 
 static float GroundHeight(float x, float z)
 {
+    const float path = PathHeight(x);
     const float away = std::clamp((fabsf(z) - 1.0f) / 3.0f, 0.0f, 1.0f);
     const float bumps = 0.32f * sinf(x * 0.31f + z * 0.7f) + 0.22f * sinf(x * 0.13f - z * 0.45f);
     const float slope = z < 0.0f ? std::max(0.0f, -z - 3.0f) * 0.11f : -std::max(0.0f, z - 1.6f) * 0.16f;
-    return PathHeight(x) + away * away * (3 - 2 * away) * bumps + slope;
+    float h = path + away * away * (3 - 2 * away) * bumps + slope;
+
+    // At the seaside the land behind the path runs down a beach to a flat sea.
+    if (z < 0.0f) {
+        const float sea = BiomeWeight(BiomeAt(x), BIOME_SEASIDE);
+        if (sea > 0.0f) {
+            const float k = std::clamp((-z - 1.5f) / 6.0f, 0.0f, 1.0f), shore = k * k * (3 - 2 * k);
+            const float beach = path + (kSeaLevel - path) * shore + 0.12f * bumps * (1.0f - shore);
+            h += (beach - h) * sea;
+        }
+    }
+    return h;
 }
 
 static void BuildPathHeights()
@@ -805,6 +1088,7 @@ static void BeginLoad(const std::string& path, bool demo)
     gPlayer.playing.store(false);
     gError.clear();
     gJob.name = demo ? "Demo track" : GetFileNameWithoutExt(path.c_str());
+    gJob.path = demo ? kDemoKey : path;
     gState = ST_LOADING;
     if (gSim) { LoadWorker(path, demo); return; }
     gJob.thread = std::thread(LoadWorker, path, demo);
@@ -841,6 +1125,10 @@ static void FinishLoad()
     gPlayer.sampleRate = gJob.sampleRate;
     gSong = std::move(gJob.song);
     gSongName = gJob.name;
+    gSongPath = gJob.path;
+    if (!gSim) RememberSong(gSongPath, gSongName, (float)gSong.duration);
+    gMenuSel = 0;
+    gMenuScroll = 0;
     BuildPathHeights();
     gState = ST_READY;
 }
@@ -867,6 +1155,17 @@ static void StartGame()
     gStreak = gJoy = gJoyKick = 0.0f;
     gMilestoneAge = 9.0f;
     gBloomMark = (float)(-kLeadIn) * kScrollBase * gCfg.speed;
+    for (Impact& hit : gImpacts) hit.age = 9.0f;
+    gRig = CameraRig();
+    gEdgePower = 0.0f;
+    gNewBest = false;
+
+    // The journey: each song starts somewhere of its own and moves on every half minute or so.
+    uint32_t nameHash = 2166136261u;
+    for (unsigned char c : gSongName) nameHash = (nameHash ^ c) * 16777619u;
+    gFirstBiome = (int)(nameHash % BIOME_COUNT);
+    const int places = std::clamp((int)std::lround(gSong.duration / 30.0), 1, (int)BIOME_COUNT);
+    gBiomeSpan = (float)(gSong.duration / places) * kScrollBase * gCfg.speed;
     gJudgeKind = -1;
     gCatAction = -1;
     gScroll = kScrollBase * gCfg.speed;
@@ -921,6 +1220,11 @@ static void Celebrate(Vector3 at, int stars, int hearts)
                  0.9f + Rand01() * 0.5f, SPARK_HEART, 0.12f + Rand01() * 0.06f, -0.5f);
 }
 
+static void AddRing(Vector3 pos, Vector3 col, float size, float life, bool upright, float delay = 0.0f)
+{
+    gRings[gNextRing++ % kRingCount] = Ring{ pos, -delay, life, size, col, upright };
+}
+
 static void Judge(int note, double error, double t)
 {
     const double e = std::fabs(error);
@@ -937,20 +1241,58 @@ static void Judge(int note, double error, double t)
     gJudgeAge = 0.0f;
     gComboPop = 1.0f;
 
+    const float power = j == J_PERFECT ? 1.0f : j == J_GREAT ? 0.65f : 0.4f;
+    const Vector3 colour = kActionColor[action], white = { 1, 1, 1 };
     Vector3 at = NotePosition(note);
+    const float ground = PathHeight(at.x);
     at.y += 0.2f;
-    Burst(at, kActionColor[action], j == J_PERFECT ? 8 : j == J_GREAT ? 6 : 4);
+    Burst(at, colour, j == J_PERFECT ? 8 : j == J_GREAT ? 6 : 4);
 
     // Each action has its own instrument, and the note climbs with the streak.
     const float semitones = SfxStreakSemitones(gCombo);
     PlaySfx(SFX_HOP + action, semitones, j == J_PERFECT ? 1.0f : j == J_GREAT ? 0.75f : 0.5f);
 
+    // The camera answers each action differently: it bounces with a hop,
+    // lunges with a bat, tips with a swat and sways with a bell.
+    gRig.flip = -gRig.flip;
+    switch (action) {
+        case ACT_HOP:  KickCamera(0.0f, 2.4f * power, 0.0f, -7.0f * power); break;
+        case ACT_BAT:  KickCamera(2.8f * power, 0.0f, 0.0f, 17.0f * power); break;
+        case ACT_SWAT: KickCamera(0.0f, 1.6f * power, 0.3f * power * gRig.flip, 9.0f * power); break;
+        case ACT_RING: KickCamera(0.0f, 0.0f, 0.5f * power * gRig.flip, 11.0f * power); break;
+    }
+
+    // On screen: a burst of streaks, a ring bursting towards the camera, glowing edges.
+    gImpacts[gNextImpact++ % kImpactCount] = Impact{ at, 0.0f, action, j };
+    gEdgeColour = colour;
+    gEdgePower = std::max(gEdgePower, power);
+    AddRing(at, Mix(colour, white, 0.4f), 0.45f + 0.5f * power, 0.28f, true);
+    switch (action) {
+        case ACT_HOP:    // dust where the cat took off
+            for (int i = 0; i < 5; i++)
+                AddSpark(Vector3{ at.x - 0.9f + Rand01() * 0.5f, ground + 0.1f, (Rand01() - 0.5f) * 0.8f },
+                         Vector3{ -0.4f - Rand01() * 0.8f, 0.3f + Rand01() * 0.5f, 0 }, Vector3{ 0.93f, 0.86f, 0.74f }, 0.5f, SPARK_PUFF, 0.16f + Rand01() * 0.1f, -0.3f);
+            break;
+        case ACT_BAT:    // a puff of wool
+            for (int i = 0; i < 4; i++)
+                AddSpark(at, Vector3{ 0.5f + Rand01() * 1.5f, (Rand01() - 0.3f) * 1.2f, 0 }, Mix(colour, white, 0.6f), 0.4f, SPARK_PUFF, 0.12f + Rand01() * 0.08f, 0.0f);
+            break;
+        case ACT_SWAT:   // sparkling dust off the wings
+            Celebrate(at, 3, 0);
+            break;
+        case ACT_RING:   // the sound itself, as rings
+            AddRing(at, colour, 1.0f, 0.5f, true, 0.06f);
+            AddRing(at, colour, 1.5f, 0.6f, true, 0.14f);
+            break;
+    }
+
     if (j == J_PERFECT) {
-        // A perfect hit always gets a twinkle, stars, a ring of light and two new flowers.
+        // A perfect hit always gets a twinkle, stars, rings of light on the path and two new flowers.
         PlaySfx(SFX_TWINKLE, semitones);
         gJoyKick = 1.0f;
         Celebrate(at, 5 + (int)(gJoy * 4.0f), gJoy > 0.3f ? 1 + (int)(gJoy * 2.0f) : 0);
-        gRings[gNextRing++ % kRingCount] = Ring{ Vector3{ at.x, PathHeight(at.x) + 0.04f, 0 }, 0.0f };
+        AddRing(Vector3{ at.x, ground + 0.04f, 0 }, Vector3{ 1.0f, 0.96f, 0.8f }, 1.8f, 0.45f, false);
+        AddRing(Vector3{ at.x, ground + 0.04f, 0 }, Vector3{ 1.0f, 0.96f, 0.8f }, 2.6f, 0.6f, false, 0.08f);
         AddBloom(at.x + (Rand01() - 0.5f) * 0.8f, -1.25f - Rand01() * 0.7f);
         AddBloom(at.x + (Rand01() - 0.5f) * 0.8f, 1.8f + Rand01() * 0.6f);
     }
@@ -959,6 +1301,7 @@ static void Judge(int note, double error, double t)
         gMilestone = gCombo;
         gMilestoneAge = 0.0f;
         PlaySfx(SFX_MILESTONE);
+        KickCamera(0.0f, 0.0f, 0.0f, 42.0f);   // lean in for the big moments
         Celebrate(Vector3{ gScene.worldX + 0.4f, PathHeight(gScene.worldX) + 1.4f, 0.2f }, 10, 8);
     }
 }
@@ -974,6 +1317,10 @@ static void Miss(int note, double t)
     gJudgeAge = 0.0f;
     CatDo(ACT_STUMBLE);
     PlaySfx(SFX_MISS);
+    gRig.flip = -gRig.flip;
+    KickCamera(1.6f * gRig.flip, 0.0f, 0.35f * gRig.flip, -4.0f);   // a little wobble
+    gEdgeColour = Vector3{ 0.6f, 0.62f, 0.75f };
+    gEdgePower = std::max(gEdgePower, 0.6f);
 }
 
 // The player asked for `action` at song time `t`: the cat does it, and the
@@ -1005,6 +1352,17 @@ static void FinishGame()
     for (size_t i = 0; i < gNoteState.size(); i++)
         if (!gNoteState[i]) { gNoteState[i] = 4; gCount[J_MISS]++; }
     gEndJoy = std::clamp((Accuracy() - 0.6f) / 0.35f, 0.0f, 1.0f) * 0.85f;
+    gNewBest = false;
+    if (!gCfg.watch && !gSim) {
+        if (SongEntry* e = FindSong(gSongPath)) {
+            if (Accuracy() > e->best[gCfg.diff]) {
+                gNewBest = e->best[gCfg.diff] >= 0.0f;
+                e->best[gCfg.diff] = Accuracy();
+                e->score[gCfg.diff] = gScore;
+                SaveLibrary();
+            }
+        }
+    }
     for (Bloom& b : gBlooms) b.x = -1e9f;
     gState = ST_RESULTS;
     SaveSettings();
@@ -1101,9 +1459,10 @@ static void UpdateScene(float dt, double t)
     float joyTarget = gJoy;
     if (gState == ST_PLAYING) joyTarget = 1.0f - expf(-gStreak / 18.0f);
     else if (gState == ST_RESULTS) joyTarget = gEndJoy;
-    else if (!PathFollowsSong()) joyTarget = 0.0f;
+    else if (!PathFollowsSong()) joyTarget = 0.22f;   // menus keep a little sparkle
     gJoy += (joyTarget - gJoy) * std::min(1.0f, dt * (joyTarget > gJoy ? 3.0f : 5.0f));
     gJoyKick *= expf(-dt * 7.0f);
+    gEdgePower *= expf(-dt * 6.0f);
     gMilestoneAge += dt;
 
     for (int a = 0; a < ACT_COUNT; a++) s.glow[a] = gHeld[a] ? 1.0f : s.glow[a] * expf(-dt * 9.0f);
@@ -1111,6 +1470,14 @@ static void UpdateScene(float dt, double t)
         gCatActionAge += dt;
         s.wag += dt * (2.6f + 5.0f * gJoy);
         for (Ring& r : gRings) r.age += dt;
+        for (Impact& hit : gImpacts) hit.age += dt;
+        for (int step = 0; step < 4; step++) {   // camera springs, in small steps so they stay stable
+            const float h = dt / 4.0f, stiff = 110.0f, damp = 13.0f;
+            gRig.vx += (-stiff * gRig.x - damp * gRig.vx) * h;             gRig.x += gRig.vx * h;
+            gRig.vy += (-stiff * gRig.y - damp * gRig.vy) * h;             gRig.y += gRig.vy * h;
+            gRig.vroll += (-stiff * gRig.roll - damp * gRig.vroll) * h;    gRig.roll += gRig.vroll * h;
+            gRig.vzoom += (-stiff * gRig.zoom - damp * gRig.vzoom) * h;    gRig.zoom += gRig.vzoom * h;
+        }
         for (Spark& p : gSparks) {
             if (p.life <= 0.0f) continue;
             p.pos = Vector3Add(p.pos, Vector3Scale(p.vel, dt));
@@ -1304,11 +1671,11 @@ static Camera3D gCamera;
 static float gViewCentre = 0.0f;   // world x at the middle of the screen
 static float gViewHalf = 5.3f;     // half the visible width of the path, in world units
 
-static void EmitGround(Vector3 a, Vector3 b, Vector3 c, Vector3 col)
+static void EmitGround(Vector3 a, Vector3 b, Vector3 c, Vector3 col, float glow = 0.0f)
 {
     // Ground triangles must face up whatever order they were built in.
     const float ny = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
-    if (ny < 0.0f) EmitTri(a, c, b, col); else EmitTri(a, b, c, col);
+    if (ny < 0.0f) EmitTri(a, c, b, col, glow); else EmitTri(a, b, c, col, glow);
 }
 
 static void DrawTerrain()
@@ -1316,18 +1683,31 @@ static void DrawTerrain()
     static const float rows[] = { 40.0f, 16.0f, 7.0f, 3.6f, 1.0f, -1.0f, -2.6f, -5.0f, -8.0f, -12.0f, -17.0f, -24.0f };
     const int rowCount = (int)(sizeof(rows) / sizeof(rows[0]));
     const int x0 = (int)floorf(gViewCentre - gViewHalf * 3.5f) - 2, x1 = (int)floorf(gViewCentre + gViewHalf * 3.5f) + 3;
-    const Palette& p = gPalette;
     for (int x = x0; x < x1; x++) {
+        Vector3 grass, pathCol;
+        GroundColours((float)x + 0.5f, grass, pathCol);
+        const float sea = BiomeWeight(BiomeAt((float)x + 0.5f), BIOME_SEASIDE);
         for (int r = 0; r + 1 < rowCount; r++) {
             const float za = rows[r], zb = rows[r + 1];
             const Vector3 v00 = { (float)x, GroundHeight((float)x, za), za }, v10 = { (float)x + 1, GroundHeight((float)x + 1, za), za };
             const Vector3 v01 = { (float)x, GroundHeight((float)x, zb), zb }, v11 = { (float)x + 1, GroundHeight((float)x + 1, zb), zb };
-            const bool path = za == 1.0f;
+            const bool path = za == 1.0f, water = sea > 0.5f && za <= -8.0f;
             const float shade = 0.92f + 0.16f * Hash01(x, r);
-            const Vector3 base = path ? p.path : Mix(p.grass, Vector3Scale(p.grass, 0.82f), (float)r / rowCount);
-            const Vector3 colA = Vector3Scale(base, shade), colB = Vector3Scale(base, shade * (path ? 0.96f : 0.93f));
-            if ((x + r) & 1) { EmitGround(v00, v10, v11, colA); EmitGround(v00, v11, v01, colB); }
-            else             { EmitGround(v00, v10, v01, colA); EmitGround(v10, v11, v01, colB); }
+            Vector3 colA, colB;
+            float glow = 0.0f;
+            if (water) {
+                // Bands of lighter water drift across the sea.
+                const float wave = 0.5f + 0.5f * sinf(x * 0.7f + r * 1.9f + gScene.time * 1.3f);
+                colA = Vector3Multiply(Mix(Rgb(64, 164, 198), Rgb(150, 222, 232), wave * 0.6f), gShadePath);
+                colB = Vector3Scale(colA, 0.94f);
+                glow = 0.35f;
+            } else {
+                const Vector3 base = path ? pathCol : Mix(grass, Vector3Scale(grass, 0.82f), (float)r / rowCount);
+                colA = Vector3Scale(base, shade);
+                colB = Vector3Scale(base, shade * (path ? 0.96f : 0.93f));
+            }
+            if ((x + r) & 1) { EmitGround(v00, v10, v11, colA, glow); EmitGround(v00, v11, v01, colB, glow); }
+            else             { EmitGround(v00, v10, v01, colA, glow); EmitGround(v10, v11, v01, colB, glow); }
         }
     }
 }
@@ -1345,79 +1725,166 @@ static void AddHalo(Vector3 pos, float radius, Vector3 col, float alpha)
 }
 
 // Trees, houses and small things, placed by hashing the position so the same
-// stretch of path always looks the same. Everything bops a little on the beat.
+// stretch of path always looks the same. What grows there depends on the
+// place. Everything bops a little on the beat.
 static void DrawScenery()
 {
     static const Vector3 kLeaf[5] = { { 0.47f, 0.72f, 0.42f }, { 0.38f, 0.64f, 0.44f }, { 0.60f, 0.76f, 0.40f }, { 0.96f, 0.66f, 0.42f }, { 0.96f, 0.62f, 0.68f } };
     static const Vector3 kPetal[4] = { { 1.0f, 0.86f, 0.4f }, { 1.0f, 0.62f, 0.7f }, { 0.75f, 0.7f, 1.0f }, { 1.0f, 1.0f, 1.0f } };
+    static const Vector3 kFall[4] = { { 0.98f, 0.62f, 0.30f }, { 0.90f, 0.38f, 0.30f }, { 0.98f, 0.80f, 0.36f }, { 0.72f, 0.46f, 0.30f } };
+    static const Vector3 kBlossom[3] = { { 1.0f, 0.72f, 0.82f }, { 1.0f, 0.88f, 0.92f }, { 0.98f, 0.62f, 0.78f } };
+    static const Vector3 kShellTint[3] = { { 1.0f, 0.6f, 0.56f }, { 1.0f, 0.82f, 0.5f }, { 0.96f, 0.7f, 0.86f } };
     const Palette& p = gPalette;
     const float bop = 1.0f + (0.07f + 0.18f * gJoy) * gScene.beat;   // everything dances harder on a streak
     const float lit = std::max(p.lamps, gJoy * 0.7f);                // and lamps come on even by day
     const Vector3 white = { 1, 1, 1 };
     const Vector3 night = Mix(white, Vector3{ 0.7f, 0.8f, 1.0f }, p.stars);   // leaves cool down after dark
-    const float spacing = 2.4f;
+    const Vector3 tiles = { 0.80f, 0.42f, 0.36f }, snowTint = { 0.95f, 0.97f, 1.0f }, pineGreen = { 0.30f, 0.50f, 0.42f };
+    const float spacing = 2.4f, time = gScene.time;
     const int s0 = (int)floorf((gViewCentre - gViewHalf * 2.7f - 3.0f) / spacing), s1 = (int)floorf((gViewCentre + gViewHalf * 2.7f + 3.0f) / spacing);
 
     for (int s = s0; s <= s1; s++) {
         const float fx = s * spacing;
-        const float sway = 0.08f * gJoy * sinf(gScene.time * 3.2f + fx);
-        {   // beside the path: flowers, bushes, rocks, mushrooms, lamps
-            const float r = Hash01(s, 2), x = fx + Hash01(s, 3) * 1.8f, z = -1.9f - Hash01(s, 4) * 1.3f;
-            const Vector3 at = { x, GroundHeight(x, z), z };
-            if (r < 0.24f) {
-                for (int k = 0; k < 3; k++) {
-                    const float ox = x + (Hash01(s, 50 + k) - 0.5f) * 0.8f, oz = z + (Hash01(s, 60 + k) - 0.5f) * 0.6f;
-                    DrawShape(sFlower, Place(Vector3{ ox, GroundHeight(ox, oz), oz }, 1.0f, sway, bop), kPetal[Hash(s, 70 + k) & 3]);
+        const float sway = 0.08f * gJoy * sinf(time * 3.2f + fx);
+        const int biome = BiomeNear(fx + 1.2f);
+
+        auto ground = [](float x, float z) { return Vector3{ x, GroundHeight(x, z), z }; };
+        auto tree = [&](Vector3 at, float size, const Shape& top, Vector3 leaf) {
+            DrawShape(sTrunk, Place(at, size, sway));
+            DrawShape(top, Place(at, size, sway, bop), Vector3Multiply(leaf, night));
+        };
+        auto lamp = [&](Vector3 at) {
+            DrawShape(sLampPost, Place(at));
+            DrawShape(sLamp, Place(at), white, 0.25f + 0.75f * lit);
+            AddHalo(Vector3{ at.x, at.y + 1.5f, at.z + 0.15f }, 0.5f + 0.06f * gScene.beat, kWarm, 0.13f * lit);
+        };
+        auto house = [&](Vector3 at, Vector3 roof, float glow) {
+            DrawShape(sHouse, Place(at, 1.25f));
+            DrawShape(sRoof, Place(at, 1.25f), Vector3Multiply(roof, night));
+            DrawShape(sWindows, Place(at, 1.25f), white, 0.2f + 0.8f * glow);
+            AddHalo(Vector3{ at.x + 0.38f, at.y + 0.88f, at.z + 1.0f }, 0.55f, kWarm, 0.12f * glow);
+        };
+        auto flowers = [&](Vector3 at, int count) {
+            for (int k = 0; k < count; k++) {
+                const float ox = at.x + (Hash01(s, 50 + k) - 0.5f) * 0.8f, oz = at.z + (Hash01(s, 60 + k) - 0.5f) * 0.6f;
+                DrawShape(sFlower, Place(ground(ox, oz), 1.0f, sway, bop), kPetal[Hash(s, 70 + k) & 3]);
+            }
+        };
+
+        // Four bands by depth: beside the path, the middle distance, far away, and in front.
+        const float rNear = Hash01(s, 2), rMid = Hash01(s, 8), rFar = Hash01(s, 14), rFront = Hash01(s, 24);
+        const Vector3 nearAt = ground(fx + Hash01(s, 3) * 1.8f, -1.9f - Hash01(s, 4) * 1.3f);
+        const Vector3 midAt = ground(fx + Hash01(s, 9) * 2.0f, -4.2f - Hash01(s, 10) * 3.4f);
+        const Vector3 farAt = ground(fx + Hash01(s, 15) * 2.0f, -9.5f - Hash01(s, 16) * 6.0f);
+        const Vector3 homeAt = ground(farAt.x, -9.5f - Hash01(s, 16) * 2.0f);
+        const Vector3 frontAt = ground(fx + Hash01(s, 25) * 2.0f, 2.0f + Hash01(s, 26) * 1.6f);
+        const float size = 0.95f + Hash01(s, 11) * 0.5f, farSize = 1.3f + Hash01(s, 17) * 0.8f, small = 0.8f + Hash01(s, 5) * 0.5f;
+
+        switch (biome) {
+            case BIOME_MEADOW: {
+                if (rNear < 0.24f) flowers(nearAt, 3);
+                else if (rNear < 0.38f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
+                else if (rNear < 0.46f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                else if (rNear < 0.52f) DrawShape(sMushroom, Place(nearAt, 1.0f, sway, bop));
+                else if (rNear < 0.60f) lamp(nearAt);
+                if (rMid < 0.6f) {
+                    if (Hash(s, 13) & 1) tree(midAt, size, sCrown, kLeaf[Hash(s, 12) % 5]);
+                    else tree(midAt, size, sPine, Vector3Scale(kLeaf[Hash(s, 12) % 3], 0.85f));
                 }
-            } else if (r < 0.38f) DrawShape(sBush, Place(at, 0.8f + Hash01(s, 5) * 0.5f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
-            else if (r < 0.46f) DrawShape(sRock, Place(at, 0.8f + Hash01(s, 5)));
-            else if (r < 0.52f) DrawShape(sMushroom, Place(at, 1.0f, sway, bop));
-            else if (r < 0.60f) {
-                DrawShape(sLampPost, Place(at));
-                DrawShape(sLamp, Place(at), white, 0.25f + 0.75f * lit);
-                AddHalo(Vector3{ at.x, at.y + 1.5f, at.z + 0.15f }, 0.5f + 0.06f * gScene.beat, kWarm, 0.13f * lit);
+                if (rFar < 0.14f) house(homeAt, tiles, lit);
+                else if (rFar < 0.62f) {
+                    const bool pine = (Hash(s, 18) % 3) != 0;
+                    tree(farAt, farSize, pine ? sPine : sCrown, Vector3Scale(kLeaf[Hash(s, 19) % (pine ? 3 : 5)], 0.88f));
+                }
+                if (rFront < 0.2f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
+                else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f));
+                else if (rFront < 0.38f) DrawShape(sBush, Place(frontAt, 0.6f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
+                break;
+            }
+            case BIOME_BLOSSOM: {
+                if (rNear < 0.26f) flowers(nearAt, 3);
+                else if (rNear < 0.34f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[1], night));
+                else if (rNear < 0.42f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                else if (rNear < 0.58f) {   // stone lantern
+                    DrawShape(sStoneLantern, Place(nearAt, 1.1f));
+                    DrawShape(sLanternGlow, Place(nearAt, 1.1f), white, 0.3f + 0.7f * lit);
+                    AddHalo(Vector3{ nearAt.x, nearAt.y + 0.97f, nearAt.z + 0.2f }, 0.42f, kWarm, 0.14f * lit);
+                }
+                if (rMid < 0.62f) tree(midAt, size * 1.12f, sCrown, kBlossom[Hash(s, 12) % 3]);
+                else if (rMid < 0.84f) DrawShape(sBamboo, Place(midAt, 0.9f + Hash01(s, 11) * 0.4f, sway * 0.6f), night);
+                if (rFar < 0.10f) DrawShape(sGate, Place(ground(farAt.x, -9.0f), 1.35f));
+                else if (rFar < 0.62f) {
+                    if (Hash(s, 18) % 4) tree(farAt, farSize, sCrown, Vector3Scale(kBlossom[Hash(s, 19) % 3], 0.94f));
+                    else tree(farAt, farSize, sPine, Vector3Scale(kLeaf[1], 0.85f));
+                }
+                if (rFront < 0.22f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[1 + (Hash(s, 27) & 1) * 2]);
+                else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f));
+                break;
+            }
+            case BIOME_AUTUMN: {
+                if (rNear < 0.18f) DrawShape(sPumpkin, Place(nearAt, 0.7f + Hash01(s, 5) * 0.6f, 0.0f, bop));
+                else if (rNear < 0.32f) DrawShape(sMushroom, Place(nearAt, 1.3f, sway, bop));
+                else if (rNear < 0.42f) DrawShape(sStump, Place(nearAt, small));
+                else if (rNear < 0.52f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                else if (rNear < 0.60f) lamp(nearAt);
+                else if (rNear < 0.76f) DrawShape(sLeafPile, Place(nearAt, small + 0.2f), Vector3Multiply(kFall[Hash(s, 6) % 4], night));
+                if (rMid < 0.66f) {
+                    if (Hash(s, 13) % 5) tree(midAt, size, sCrown, kFall[Hash(s, 12) % 4]);
+                    else tree(midAt, size, sPine, Vector3Scale(kLeaf[1], 0.8f));
+                }
+                if (rFar < 0.12f) house(homeAt, Vector3{ 0.62f, 0.40f, 0.34f }, lit);
+                else if (rFar < 0.20f) DrawShape(sHay, Place(farAt, 1.3f));
+                else if (rFar < 0.68f) tree(farAt, farSize, sCrown, Vector3Scale(kFall[Hash(s, 19) % 4], 0.9f));
+                if (rFront < 0.16f) DrawShape(sPumpkin, Place(frontAt, 0.6f, 0.0f, bop));
+                else if (rFront < 0.28f) DrawShape(sLeafPile, Place(frontAt, 0.7f), Vector3Multiply(kFall[Hash(s, 28) % 4], night));
+                else if (rFront < 0.36f) DrawShape(sRock, Place(frontAt, 0.7f));
+                break;
+            }
+            case BIOME_SNOW: {
+                if (rNear < 0.14f) DrawShape(sSnowman, Place(nearAt, 1.0f, sway, bop));
+                else if (rNear < 0.30f) DrawShape(sRock, Place(nearAt, small + 0.3f), Vector3{ 0.9f, 0.94f, 1.0f });
+                else if (rNear < 0.42f) lamp(nearAt);
+                else if (rNear < 0.54f) DrawShape(sBush, Place(nearAt, small), Vector3Multiply(snowTint, night));   // a snowdrift
+                if (rMid < 0.62f) {
+                    tree(midAt, size, sPine, pineGreen);
+                    DrawShape(sSnowCap, Place(midAt, size, sway, bop), Vector3Multiply(snowTint, night));
+                }
+                if (rFar < 0.20f) house(homeAt, snowTint, std::max(lit, 0.55f));   // cabins keep a light on
+                else if (rFar < 0.66f) {
+                    tree(farAt, farSize, sPine, Vector3Scale(pineGreen, 0.9f));
+                    DrawShape(sSnowCap, Place(farAt, farSize, sway, bop), Vector3Multiply(snowTint, night));
+                }
+                if (rFront < 0.2f) DrawShape(sBush, Place(frontAt, 0.6f), Vector3Multiply(snowTint, night));
+                else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f), Vector3{ 0.9f, 0.94f, 1.0f });
+                break;
+            }
+            case BIOME_SEASIDE: {
+                if (rNear < 0.16f) DrawShape(sUmbrella, Place(nearAt, 1.1f, sway * 0.5f));
+                else if (rNear < 0.28f) DrawShape(sCastle, Place(nearAt, 1.0f));
+                else if (rNear < 0.46f) DrawShape(sShell, Place(nearAt, 1.0f + Hash01(s, 5)), kShellTint[Hash(s, 6) % 3]);
+                else if (rNear < 0.56f) DrawShape(sRock, Place(nearAt, small + 0.2f));
+                else if (rNear < 0.62f) lamp(nearAt);
+                if (rMid < 0.4f) {   // palms stay on the sand, above the waterline
+                    const Vector3 at = ground(midAt.x, -4.4f - Hash01(s, 10) * 1.8f);
+                    DrawShape(sPalmTrunk, Place(at, size * 0.9f, sway * 0.7f));
+                    DrawShape(sPalmLeaves, Place(at, size * 0.9f, sway * 0.7f, bop), Vector3Multiply(kLeaf[Hash(s, 12) % 3], night));
+                }
+                if (rFar < 0.22f) {   // a boat bobbing on the sea
+                    const Vector3 at = { farAt.x + 0.8f * sinf(time * 0.3f + s), kSeaLevel + 0.05f * sinf(time * 1.7f + s), -11.0f - Hash01(s, 16) * 6.0f };
+                    DrawShape(sBoat, Place(at, 1.5f, 0.06f * sinf(time * 1.3f + s)));
+                }
+                if (rFront < 0.24f) DrawShape(sShell, Place(frontAt, 1.2f), kShellTint[Hash(s, 27) % 3]);
+                else if (rFront < 0.34f) DrawShape(sRock, Place(frontAt, 0.7f));
+                break;
             }
         }
-        {   // middle distance: round trees and pines
-            const float r = Hash01(s, 8), x = fx + Hash01(s, 9) * 2.0f, z = -4.2f - Hash01(s, 10) * 3.4f;
-            if (r < 0.6f) {
-                const Vector3 at = { x, GroundHeight(x, z), z };
-                const float size = 0.95f + Hash01(s, 11) * 0.5f;
-                const Vector3 leaf = Vector3Multiply(kLeaf[Hash(s, 12) % 5], night);
-                DrawShape(sTrunk, Place(at, size, sway));
-                if (Hash(s, 13) & 1) DrawShape(sCrown, Place(at, size, sway, bop), leaf);
-                else DrawShape(sPine, Place(at, size, sway, bop), Vector3Multiply(kLeaf[Hash(s, 12) % 3], Vector3Scale(night, 0.85f)));
-            }
-        }
-        {   // far: bigger trees and the odd house with a lit window
-            const float r = Hash01(s, 14), x = fx + Hash01(s, 15) * 2.0f, z = -9.5f - Hash01(s, 16) * 6.0f;
-            const Vector3 at = { x, GroundHeight(x, z), z };
-            if (r < 0.14f) {
-                const float hz = -9.5f - Hash01(s, 16) * 2.0f;
-                const Vector3 home = { x, GroundHeight(x, hz), hz };
-                DrawShape(sHouse, Place(home, 1.25f));
-                DrawShape(sWindows, Place(home, 1.25f), white, 0.2f + 0.8f * lit);
-                AddHalo(Vector3{ home.x + 0.38f, home.y + 0.88f, home.z + 1.0f }, 0.55f, kWarm, 0.12f * lit);
-            } else if (r < 0.62f) {
-                const float size = 1.3f + Hash01(s, 17) * 0.8f;
-                DrawShape(sTrunk, Place(at, size, sway));
-                const bool pine = (Hash(s, 18) % 3) != 0;
-                DrawShape(pine ? sPine : sCrown, Place(at, size, sway, bop), Vector3Multiply(kLeaf[Hash(s, 19) % (pine ? 3 : 5)], Vector3Scale(night, 0.88f)));
-            }
-        }
-        {   // in front of the path: only low things, so nothing hides the cat
-            const float r = Hash01(s, 24), x = fx + Hash01(s, 25) * 2.0f, z = 2.0f + Hash01(s, 26) * 1.6f;
-            const Vector3 at = { x, GroundHeight(x, z), z };
-            if (r < 0.2f) DrawShape(sFlower, Place(at, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
-            else if (r < 0.3f) DrawShape(sRock, Place(at, 0.7f));
-            else if (r < 0.38f) DrawShape(sBush, Place(at, 0.6f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
-        }
+
         // Small pastel butterflies join in behind the path once the streak is going.
         if (gJoy > 0.4f && Hash01(s, 90) < (gJoy - 0.4f) * 1.4f) {
             static const Vector3 kPastel[3] = { { 1.0f, 0.72f, 0.84f }, { 1.0f, 0.92f, 0.6f }, { 0.82f, 0.74f, 1.0f } };
-            const float phase = Hash01(s, 91) * 6.283f, time = gScene.time;
+            const float phase = Hash01(s, 91) * 6.283f;
             const float x = fx + Hash01(s, 92) * 2.0f + 0.5f * sinf(time * 0.9f + phase), z = -2.2f - Hash01(s, 93) * 3.2f;
-            const float y = GroundHeight(x, z) + 1.0f + Hash01(s, 94) * 1.3f + 0.25f * sinf(time * 2.1f + phase);
+            const float y = std::max(GroundHeight(x, z), kSeaLevel) + 1.0f + Hash01(s, 94) * 1.3f + 0.25f * sinf(time * 2.1f + phase);
             const float flap = 0.1f + 1.0f * (0.5f + 0.5f * sinf(time * 16.0f + phase));
             const Matrix body = Place(Vector3{ x, y, z }, 0.5f);
             DrawShape(sWing, MatrixMultiply(MatrixRotateY(-flap), body), kPastel[Hash(s, 95) % 3], 0.6f);
@@ -1428,9 +1895,9 @@ static void DrawScenery()
     // Flowers that bloomed because of the streak: they spring up with a bounce.
     for (const Bloom& b : gBlooms) {
         if (b.x < gViewCentre - gViewHalf * 1.6f - 2.0f || b.x > gViewCentre + gViewHalf * 1.6f + 2.0f) continue;
-        const float k = std::clamp((gScene.time - b.born) * 3.5f, 0.0f, 1.0f);
+        const float k = std::clamp((time - b.born) * 3.5f, 0.0f, 1.0f);
         const float size = b.size * k * (1.0f + 0.45f * sinf(k * kPi));
-        DrawShape(sFlower, Place(Vector3{ b.x, GroundHeight(b.x, b.z), b.z }, size, 0.1f * gJoy * sinf(gScene.time * 3.2f + b.x), bop), kPetal[b.tint]);
+        DrawShape(sFlower, Place(Vector3{ b.x, GroundHeight(b.x, b.z), b.z }, size, 0.1f * gJoy * sinf(time * 3.2f + b.x), bop), kPetal[b.tint]);
     }
 }
 
@@ -1597,14 +2064,18 @@ static void DrawSparksAndShadows()
     }
 
     for (const Ring& ring : gRings) {
-        if (ring.age > 0.45f) continue;
-        const float k = ring.age / 0.45f;
-        DrawShape(sRing, Place(ring.pos, 0.35f + 2.0f * k), Vector3{ 1.0f, 0.96f, 0.8f }, 1.0f, 0.7f * (1.0f - k) * (1.0f - k));
+        if (ring.age < 0.0f || ring.age >= ring.life) continue;
+        const float k = ring.age / ring.life, grow = 1.0f - (1.0f - k) * (1.0f - k);   // fast at first, then easing out
+        DrawShape(ring.upright ? sRingUp : sRing, Place(ring.pos, ring.size * (0.2f + 0.8f * grow)), ring.col, 1.0f, (ring.upright ? 0.75f : 0.5f) * (1.0f - k) * (1.0f - k));
     }
 
     for (const Spark& s : gSparks) {
         if (s.life <= 0.0f) continue;
         const float k = s.life / s.span;   // 1 when born, 0 when gone
+        if (s.kind == SPARK_PUFF) {        // a soft cloud that swells as it fades
+            DrawShape(sHalo, Place(s.pos, s.size * (1.0f + 2.2f * (1.0f - k))), s.col, 1.0f, 0.45f * k);
+            continue;
+        }
         if (s.kind == SPARK_SHARD) {
             DrawShape(sSpark, Place(s.pos, s.size + s.life * 0.3f, s.life * 9.0f), s.col, 1.0f, std::min(1.0f, s.life * 4.0f));
         } else if (s.kind == SPARK_STAR) {
@@ -1618,21 +2089,130 @@ static void DrawSparksAndShadows()
 }
 
 
+// Keeps a colour's brightness but pulls its hue towards `hue`.
+static Vector3 TintTowards(Vector3 col, Vector3 hue, float amount)
+{
+    const float lum = 0.3f * col.x + 0.59f * col.y + 0.11f * col.z, hueLum = 0.3f * hue.x + 0.59f * hue.y + 0.11f * hue.z;
+    return Mix(col, Vector3Scale(hue, lum / std::max(0.05f, hueLum)), amount);
+}
+
+// Weather and wildlife of the place, drawn flat. `front` is the layer that passes in front of the world.
+static void PlaceParticles(float horizonY, bool front)
+{
+    const BiomeMix m = BiomeAt(gViewCentre);
+    const float time = gScene.time;
+    if (!front) {
+        // Seagulls drift over the sea.
+        const float gulls = BiomeWeight(m, BIOME_SEASIDE) * 4.0f;
+        for (int i = 0; i < (int)gulls + 1; i++) {
+            const float a = std::clamp(gulls - i, 0.0f, 1.0f);
+            if (a <= 0.0f) break;
+            const float x = Wrap(Hash01(i, 201) * gVW + time * (7.0f + i * 3.0f), gVW + 40.0f) - 20.0f;
+            const float y = horizonY * (0.18f + 0.4f * Hash01(i, 202)) + 3.0f * sinf(time * 0.8f + i);
+            const float flap = 2.0f + 1.5f * sinf(time * 5.0f + i * 2.0f);
+            const Color c = Color{ 255, 255, 255, (unsigned char)(220 * a) };
+            DrawLineEx(Vector2{ x - 5, y - flap }, Vector2{ x, y }, 1.0f, c);
+            DrawLineEx(Vector2{ x, y }, Vector2{ x + 5, y - flap }, 1.0f, c);
+        }
+        return;
+    }
+    const float snow = BiomeWeight(m, BIOME_SNOW) * 60.0f;
+    for (int i = 0; i < (int)snow + 1; i++) {
+        const float a = std::clamp(snow - i, 0.0f, 1.0f);
+        if (a <= 0.0f) break;
+        const float x = Wrap(Hash01(i, 211) * gVW + sinf(time * 0.8f + i) * 10.0f - time * 6.0f, (float)gVW);
+        const float y = Wrap(Hash01(i, 212) * gVH + time * (22.0f + Hash01(i, 213) * 18.0f), (float)gVH);
+        const int size = i % 5 == 0 ? 2 : 1;
+        DrawRectangle((int)x, (int)y, size, size, Color{ 255, 255, 255, (unsigned char)(225 * a) });
+    }
+    const float petals = BiomeWeight(m, BIOME_BLOSSOM) * 22.0f;
+    for (int i = 0; i < (int)petals + 1; i++) {
+        const float a = std::clamp(petals - i, 0.0f, 1.0f);
+        if (a <= 0.0f) break;
+        const float x = Wrap(Hash01(i, 221) * gVW - time * (12.0f + Hash01(i, 222) * 10.0f) + sinf(time * 1.2f + i) * 8.0f, (float)gVW);
+        const float y = Wrap(Hash01(i, 223) * gVH + time * (14.0f + Hash01(i, 224) * 12.0f), gVH * 0.86f);
+        Poly2(x, y, 2.4f, 1.3f, 4, time * 2.6f + i, Color{ 255, (unsigned char)(190 + (i % 3) * 22), (unsigned char)(210 + (i % 2) * 26), (unsigned char)(215 * a) });
+    }
+    static const Color kLeaves[3] = { { 244, 150, 70, 255 }, { 226, 96, 76, 255 }, { 250, 204, 96, 255 } };
+    const float leaves = BiomeWeight(m, BIOME_AUTUMN) * 18.0f;
+    for (int i = 0; i < (int)leaves + 1; i++) {
+        const float a = std::clamp(leaves - i, 0.0f, 1.0f);
+        if (a <= 0.0f) break;
+        const float x = Wrap(Hash01(i, 231) * gVW - time * (9.0f + Hash01(i, 232) * 9.0f) + sinf(time * 1.6f + i) * 14.0f, (float)gVW);
+        const float y = Wrap(Hash01(i, 233) * gVH + time * (12.0f + Hash01(i, 234) * 10.0f), gVH * 0.86f);
+        Poly2(x, y, 3.0f, 1.8f, 4, time * 2.0f + i * 1.3f, Fade(kLeaves[i % 3], 0.9f * a));
+    }
+}
+
+// What a hit looks like from the screen: streaks flying out from where it
+// landed, and the edges of the frame glowing in its colour.
+static void DrawHitOverlay()
+{
+    for (const Impact& hit : gImpacts) {
+        if (hit.age >= 0.18f) continue;
+        const Vector2 p = GetWorldToScreenEx(hit.pos, gCamera, gVW, gVH);
+        const float k = hit.age / 0.18f, reach = hit.judge == J_PERFECT ? 1.0f : 0.65f;
+        const int rays = hit.judge == J_PERFECT ? 12 : 8;
+        const Color c = ToColor(Mix(kActionColor[hit.action], Vector3{ 1, 1, 1 }, 0.55f), 1.0f - k);
+        for (int i = 0; i < rays; i++) {
+            const float a = i * 2 * kPi / rays + hit.action * 0.4f;
+            const float r0 = (10.0f + 30.0f * k) * reach, r1 = r0 + (14.0f * (1.0f - k) + 3.0f) * reach;
+            const Vector2 dir = { cosf(a), sinf(a) }, across = { -sinf(a) * 1.2f, cosf(a) * 1.2f };
+            DrawTriangle(Vector2{ p.x + dir.x * r0 + across.x, p.y + dir.y * r0 + across.y },
+                         Vector2{ p.x + dir.x * r0 - across.x, p.y + dir.y * r0 - across.y },
+                         Vector2{ p.x + dir.x * r1, p.y + dir.y * r1 }, c);
+        }
+    }
+    if (gEdgePower > 0.02f) {
+        const Color c = ToColor(gEdgeColour, 0.32f * gEdgePower), none = ToColor(gEdgeColour, 0.0f);
+        const int w = gVW / 9, h = gVH / 7;
+        DrawRectangleGradientH(0, 0, w, gVH, c, none);
+        DrawRectangleGradientH(gVW - w, 0, w, gVH, none, c);
+        DrawRectangleGradientV(0, 0, gVW, h, c, none);
+        DrawRectangleGradientV(0, gVH - h, gVW, h, none, c);
+    }
+}
+
 static void RenderWorld(double t)
 {
     const Scene& s = gScene;
     gPalette = PaletteAt(s.day);
     gHaloCount = 0;
 
+    // The camera rests a quarter of the way ahead of the cat. On top of that
+    // come the hit springs, a breath on every kick drum, and a slow drift that
+    // grows with the streak.
     const float aspect = (float)gVW / (float)gVH, tanHalf = 0.3057f;   // tan(34 deg / 2)
     const float dist = std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
+    const float reach = dist / 9.8f;
     gViewHalf = dist * tanHalf * aspect;
-    gViewCentre = s.worldX + gViewHalf * 0.47f;                        // keeps the cat a quarter of the way in
-    gCamera.position = Vector3{ gViewCentre, s.camY + 1.3f + 1.3f * dist / 9.8f + 0.05f * gJoyKick, dist };
-    gCamera.target = Vector3{ gViewCentre, s.camY + 1.3f, 0.0f };
-    gCamera.up = Vector3{ 0, 1, 0 };
-    gCamera.fovy = 34.0f - 0.7f * gJoyKick;   // a tiny punch-in on every perfect hit
+    gViewCentre = s.worldX + gViewHalf * 0.47f;
+    const float driftX = 0.3f * gJoy * sinf(s.time * 0.7f), driftY = 0.1f * gJoy * sinf(s.time * 1.1f);
+    const float camX = gViewCentre + (gRig.x + driftX) * reach, baseY = s.camY + 1.3f;
+    gCamera.position = Vector3{ camX, baseY + 1.3f * reach + (gRig.y + driftY) * reach, dist };
+    gCamera.target = Vector3{ gViewCentre + gRig.x * 0.5f * reach, baseY + gRig.y * 0.5f * reach, 0.0f };
+    gCamera.up = Vector3{ sinf(gRig.roll), cosf(gRig.roll), 0 };
+    gCamera.fovy = 34.0f - gRig.zoom - 0.45f * s.beat * (0.3f + 0.7f * gJoy);
     gCamera.projection = CAMERA_PERSPECTIVE;
+
+    // The time of day shades the ground; the place decides its colour and tints the sky.
+    // Only part of the palette's colour cast is kept, so pale ground (snow, sand) darkens at night without turning violet.
+    auto shadeOf = [](Vector3 now, Vector3 day) {
+        const Vector3 ratio = Vector3Divide(now, day);
+        const float lum = 0.3f * ratio.x + 0.59f * ratio.y + 0.11f * ratio.z;
+        return Mix(Vector3{ lum, lum, lum }, ratio, 0.45f);
+    };
+    gShadeGrass = shadeOf(gPalette.grass, Rgb(140, 196, 110));
+    gShadePath = shadeOf(gPalette.path, Rgb(232, 206, 160));
+    {
+        const BiomeMix m = BiomeAt(gViewCentre);
+        const BiomeLook a = LookOf(m.a), b = LookOf(m.b);
+        const Vector3 hue = Mix(a.sky, b.sky, m.t);
+        const float amount = a.skyMix + (b.skyMix - a.skyMix) * m.t;
+        gPalette.skyTop = TintTowards(gPalette.skyTop, hue, amount * 0.6f);
+        gPalette.skyBottom = TintTowards(gPalette.skyBottom, hue, amount);
+        GroundColours(gViewCentre, gPalette.grass, gPalette.path);   // the far hills take the local colour
+    }
 
     gLight.camera = gCamera.position;
     gLight.lightDir = Vector3Normalize(Vector3{ -0.45f, 0.8f, 0.5f });
@@ -1651,9 +2231,12 @@ static void RenderWorld(double t)
     gLight.fogEnd = dist + 30.0f;
 
     // Where the far edge of the ground meets the sky on the canvas.
-    const float horizonY = GetWorldToScreenEx(Vector3{ gCamera.target.x, s.camY + 2.3f, -24.0f }, gCamera, gVW, gVH).y;
+    Camera3D level = gCamera;
+    level.up = Vector3{ 0, 1, 0 };
+    const float horizonY = GetWorldToScreenEx(Vector3{ gCamera.target.x, s.camY + 2.3f, -24.0f }, level, gVW, gVH).y;
     ClearBackground(BLACK);
     DrawSky(horizonY);
+    PlaceParticles(horizonY, false);
 
     BeginMode3D(gCamera);
     rlBegin(RL_TRIANGLES);
@@ -1671,19 +2254,36 @@ static void RenderWorld(double t)
     rlEnableDepthMask();
     EndMode3D();
 
+    PlaceParticles(horizonY, true);
     JoyParticles(horizonY, true);
+    DrawHitOverlay();
     if (gJoyKick > 0.02f) DrawRectangle(0, 0, gVW, gVH, Color{ 255, 244, 210, (unsigned char)(26.0f * gJoyKick) });   // a soft warm glow, not a flash
 }
 
 // ---------------------------------------------------------------------------
 // UI (drawn on the low-resolution canvas with raylib's built-in pixel font)
 // ---------------------------------------------------------------------------
+// Two looks: light text with a shadow for things that sit directly on the
+// world (title, HUD), and cream paper cards with cocoa text for panels.
 
-static const Color kInk    = { 255, 246, 230, 255 };
-static const Color kSoft   = { 255, 246, 230, 170 };
-static const Color kShade  = { 30, 22, 44, 150 };
-static const Color kPanel  = { 34, 26, 50, 214 };
-static const Color kBorder = { 255, 246, 230, 70 };
+static const Color kInk       = { 255, 246, 230, 255 };
+static const Color kSoft      = { 255, 246, 230, 170 };
+static const Color kShade     = { 30, 22, 44, 150 };
+static const Color kPaper     = { 255, 247, 233, 244 };
+static const Color kPaperDeep = { 247, 232, 210, 255 };
+static const Color kLine      = { 206, 172, 148, 255 };
+static const Color kCocoa     = { 92, 64, 72, 255 };
+static const Color kCocoaSoft = { 92, 64, 72, 150 };
+static const Color kCoral     = { 240, 128, 144, 255 };
+static const Color kCoralHot  = { 248, 152, 164, 255 };
+static const Color kCoralLine = { 204, 96, 116, 255 };
+static const Color kPeach     = { 252, 204, 150, 255 };
+static const Color kPeachLine = { 226, 160, 104, 255 };
+static const Color kCream     = { 255, 252, 246, 255 };
+
+static const char* kRankLetter[5] = { "S", "A", "B", "C", "D" };
+static const Color kRankColour[5] = { { 244, 178, 60, 255 }, { 92, 188, 140, 255 }, { 96, 168, 226, 255 }, { 160, 132, 220, 255 }, { 226, 122, 142, 255 } };
+static int RankOf(float accuracy) { return accuracy >= 0.95f ? 0 : accuracy >= 0.88f ? 1 : accuracy >= 0.78f ? 2 : accuracy >= 0.65f ? 3 : 4; }
 
 // align: 0 left, 1 centre, 2 right
 static void Text(const char* text, int x, int y, int size, Color color, int align = 1, bool shadow = true)
@@ -1701,29 +2301,36 @@ static Vector2 Mouse()
     return Vector2{ m.x / gPixel, m.y / gPixel };
 }
 
-// style: 0 quiet, 1 primary, 2 selected
+// A rectangle with its corner pixels cut, an outline and a soft drop shadow.
+static void Card(int x, int y, int w, int h, Color fill, Color line, bool shadow = true)
+{
+    if (shadow) DrawRectangle(x + 2, y + 3, w, h - 1, Color{ 60, 36, 56, 60 });
+    DrawRectangle(x + 1, y, w - 2, h, line);
+    DrawRectangle(x, y + 1, w, h - 2, line);
+    DrawRectangle(x + 1, y + 1, w - 2, h - 2, fill);
+}
+
+// style: 0 quiet, 1 primary, 2 selected. Buttons lift under the pointer and sink when pressed.
 static bool Button(int x, int y, int w, int h, const char* label, int style = 0)
 {
     const Rectangle r = { (float)x, (float)y, (float)w, (float)h };
-    const bool hot = CheckCollisionPointRec(Mouse(), r);
-    Color bg, fg = kInk;
-    if (style == 1) { bg = hot ? Color{ 255, 252, 244, 255 } : Color{ 255, 240, 214, 255 }; fg = Color{ 70, 46, 60, 255 }; }
-    else if (style == 2) { bg = hot ? Color{ 255, 190, 120, 255 } : Color{ 246, 172, 104, 255 }; fg = Color{ 70, 40, 44, 255 }; }
-    else bg = hot ? Color{ 60, 46, 76, 235 } : Color{ 44, 34, 62, 215 };
-    DrawRectangle(x, y, w, h, bg);
-    DrawRectangleLines(x, y, w, h, style == 0 ? kBorder : Color{ 70, 46, 60, 120 });
-    Text(label, x + w / 2, y + (h - 10) / 2, 10, fg, 1, false);
-    const bool clicked = hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool hot = CheckCollisionPointRec(Mouse(), r), down = hot && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    Color fill = hot ? Color{ 255, 240, 222, 255 } : kPaperDeep, line = kLine, text = kCocoa;
+    if (style == 1) { fill = hot ? kCoralHot : kCoral; line = kCoralLine; text = kCream; }
+    else if (style == 2) { fill = kPeach; line = kPeachLine; }
+    const int lift = down ? 1 : hot ? -1 : 0;
+    Card(x, y + lift, w, h, fill, line, !down);
+    Text(label, x + w / 2, y + lift + (h - 10) / 2, 10, text, 1, false);
+    const bool clicked = hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState;
     if (clicked) PlaySfx(SFX_CLICK);
     return clicked;
 }
 
 static void Panel(int w, int h, int& left, int& top, bool right = false)
 {
-    left = right && gVW >= w + 260 ? gVW - w - 20 : (gVW - w) / 2;
+    left = right && gVW >= w + 260 ? gVW - w - 14 : (gVW - w) / 2;
     top = (gVH - h) / 2;
-    DrawRectangle(left, top, w, h, kPanel);
-    DrawRectangleLines(left, top, w, h, kBorder);
+    Card(left, top, w, h, kPaper, kLine);
 }
 
 // Shortens `text` with an ellipsis until it fits `maxWidth`.
@@ -1737,6 +2344,14 @@ static std::string Fit(const std::string& text, int size, int maxWidth)
         if (MeasureText((s + "...").c_str(), size) <= maxWidth) break;
     }
     return s + "...";
+}
+
+static void Paw2(float cx, float cy, float size, Color c)
+{
+    Poly2(cx, cy + size * 0.25f, size * 0.62f, size * 0.5f, 8, 0, c);
+    Poly2(cx - size * 0.62f, cy - size * 0.4f, size * 0.26f, size * 0.3f, 6, 0, c);
+    Poly2(cx, cy - size * 0.68f, size * 0.26f, size * 0.3f, 6, 0, c);
+    Poly2(cx + size * 0.62f, cy - size * 0.4f, size * 0.26f, size * 0.3f, 6, 0, c);
 }
 
 // Small picture of what each action answers, used in the key legend.
@@ -1770,54 +2385,172 @@ static void OpenSongDialog()
     if (PlatformOpenAudioDialog(GetWindowHandle(), path)) BeginLoad(path, false);
 }
 
+// The title: each letter bobs on its own, and the O has cat ears.
+static void DrawTitle(int cx, int y, int size)
+{
+    static const char* kLetters[6] = { "O", "N", "I", "R", "I", "A" };
+    const int gap = size / 10 + 2;
+    int widths[6], total = 0;
+    for (int i = 0; i < 6; i++) { widths[i] = MeasureText(kLetters[i], size); total += widths[i] + (i ? gap : 0); }
+    const float u = size / 50.0f;
+    int x = cx - total / 2;
+    for (int i = 0; i < 6; i++) {
+        const int ly = y + (int)lroundf(3.0f * sinf(gScene.time * 2.2f - i * 0.7f)) - (int)(3.0f * gScene.beat);
+        if (i == 0) {
+            for (int side = 0; side < 2; side++) {
+                const float edge = side ? (float)(x + widths[0]) : (float)x, in = side ? -1.0f : 1.0f, top = (float)ly;
+                const Vector2 a = { edge + in * 1 * u, top + 9 * u }, b = { edge + in * 5 * u, top - 13 * u }, c = { edge + in * 17 * u, top + 5 * u };
+                DrawTriangle(Vector2{ a.x - in * 3, a.y + 2 }, Vector2{ b.x - in * 1, b.y - 4 }, Vector2{ c.x + in * 4, c.y + 1 }, kCocoa);
+                DrawTriangle(a, b, c, kInk);
+                DrawTriangle(Vector2{ a.x + in * 4 * u, a.y - 2 * u }, Vector2{ b.x + in * 1 * u, b.y + 7 * u }, Vector2{ c.x - in * 4 * u, c.y - 1 * u }, Color{ 250, 170, 180, 255 });
+            }
+        }
+        for (int ox = -2; ox <= 2; ox++)
+            for (int oy = -2; oy <= 3; oy++)
+                if (ox || oy) DrawText(kLetters[i], x + ox, ly + oy, size, kCocoa);
+        DrawText(kLetters[i], x, ly, size, kInk);
+        x += widths[i] + gap;
+    }
+}
+
+static void PickSong(int index)
+{
+    if (index < 0 || index >= (int)gLibrary.size()) return;
+    const SongEntry entry = gLibrary[index];   // a copy: loading reorders the library
+    if (entry.path == kDemoKey) BeginLoad("", true);
+    else BeginLoad(entry.path, false);
+}
+
+// Title on the left over the strolling cat; on the right, a shelf with every song that has been opened.
 static void DrawMenu()
 {
-    const int cx = gVW / 2;
-    Text("ONIRIA", cx, 34, 50, kInk);
-    Text("a cozy walk through your music", cx, 90, 10, kInk);
+    const int shelfW = 240, shelfX = gVW - shelfW - 12, shelfY = 16, shelfH = gVH - 32;
+    const int leftCx = shelfX / 2, titleSize = shelfX >= 330 ? 50 : 40;
+    DrawTitle(leftCx, 34, titleSize);
+    Text("a cozy walk through your music", leftCx, 40 + titleSize, 10, kInk);
+    if (!gError.empty()) {
+        const std::string msg = Fit(gError, 10, shelfX - 24);
+        const int w = MeasureText(msg.c_str(), 10) + 16;
+        Card(leftCx - w / 2, 58 + titleSize, w, 18, kPaper, kCoralLine);
+        Text(msg.c_str(), leftCx, 62 + titleSize, 10, kCoralLine, 1, false);
+    }
+    Text(TextFormat("now passing: %s", kBiomeName[BiomeNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
+    Text("Esc pauses  -  F11 fullscreen", leftCx, gVH - 16, 10, kSoft);
 
-    const int y = gVH - 98;
-    if (!gError.empty()) Text(gError.c_str(), cx, y - 16, 10, Color{ 255, 190, 190, 255 });
-    if (Button(cx - 80, y, 160, 24, "Open a song", 1) || Key(KEY_O)) OpenSongDialog();
-    Text("or drop an audio file on the window (MP3, OGG, WAV)", cx, y + 30, 10, kInk);
-    if (Button(cx - 80, y + 46, 160, 20, "Play the demo track") || Key(KEY_ENTER)) BeginLoad("", true);
-    Text("Esc pauses  -  F11 fullscreen", cx, gVH - 16, 10, kSoft);
+    Card(shelfX, shelfY, shelfW, shelfH, kPaper, kLine);
+    Paw2((float)shelfX + 19, (float)shelfY + 20, 6, kCoral);
+    Text("Your songs", shelfX + 32, shelfY + 9, 20, kCocoa, 0, false);
+
+    const int count = (int)gLibrary.size(), rowH = 24, footer = 62;
+    const int listX = shelfX + 10, listY = shelfY + 38, rowW = shelfW - 22;
+    const int visible = std::max(1, (shelfH - 38 - footer) / rowH);
+
+    if (count > 0) {
+        bool moved = false;
+        if (Key(KEY_DOWN)) { gMenuSel++; moved = true; }
+        if (Key(KEY_UP)) { gMenuSel--; moved = true; }
+        gMenuSel = std::clamp(gMenuSel, 0, count - 1);
+        if (moved) {
+            PlaySfx(SFX_CLICK, 5.0f, 0.7f);
+            if (gMenuSel < gMenuScroll) gMenuScroll = gMenuSel;
+            if (gMenuSel >= gMenuScroll + visible) gMenuScroll = gMenuSel - visible + 1;
+        }
+    }
+    const float wheel = gSim ? 0.0f : GetMouseWheelMove();
+    if (wheel > 0.0f) gMenuScroll--;
+    if (wheel < 0.0f) gMenuScroll++;
+    gMenuScroll = std::clamp(gMenuScroll, 0, std::max(0, count - visible));
+
+    int pick = -1;
+    for (int row = 0; row < visible && gMenuScroll + row < count; row++) {
+        const int i = gMenuScroll + row, y = listY + row * rowH;
+        const SongEntry& e = gLibrary[i];
+        const Rectangle r = { (float)listX, (float)y, (float)rowW, (float)(rowH - 2) };
+        const bool hot = CheckCollisionPointRec(Mouse(), r), selected = i == gMenuSel;
+        if (selected) Card(listX, y, rowW, rowH - 2, kPeach, kPeachLine, false);
+        else if (hot) Card(listX, y, rowW, rowH - 2, kPaperDeep, kLine, false);
+
+        // Best result on any difficulty, or a little note for songs not finished yet.
+        const float best = std::max(e.best[0], std::max(e.best[1], e.best[2]));
+        if (best >= 0.0f) {
+            const int rank = RankOf(best);
+            Card(listX + 4, y + 3, 16, 16, kRankColour[rank], Fade(kCocoa, 0.35f), false);
+            Text(kRankLetter[rank], listX + 12, y + 6, 10, kCream, 1, false);
+        } else {
+            Poly2((float)listX + 10, (float)y + 14, 3.0f, 2.5f, 6, 0, kCoral);
+            DrawRectangle(listX + 12, y + 5, 1, 9, kCoral);
+            DrawRectangle(listX + 12, y + 5, 4, 2, kCoral);
+        }
+        const int secs = (int)e.duration;
+        Text(TextFormat("%d:%02d", secs / 60, secs % 60), listX + rowW - 6, y + 6, 10, kCocoaSoft, 2, false);
+        Text(Fit(e.name, 10, rowW - 30 - 40).c_str(), listX + 26, y + 6, 10, kCocoa, 0, false);
+        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) { gMenuSel = i; pick = i; PlaySfx(SFX_CLICK); }
+    }
+    if (count > visible) {   // scroll bar
+        const int trackH = visible * rowH - 2, thumbH = std::max(8, trackH * visible / count);
+        const int thumbY = listY + (trackH - thumbH) * gMenuScroll / std::max(1, count - visible);
+        DrawRectangle(shelfX + shelfW - 9, listY, 2, trackH, Fade(kLine, 0.5f));
+        DrawRectangle(shelfX + shelfW - 9, thumbY, 2, thumbH, kCoral);
+    }
+
+    const int by = shelfY + shelfH - footer + 8;
+    if (Button(shelfX + 14, by, shelfW - 28, 24, "+ Add a song", 1) || Key(KEY_O)) OpenSongDialog();
+    Text("or drop a file on the window", shelfX + shelfW / 2, by + 34, 10, kCocoaSoft, 1, false);
+
+    if (gState != ST_MENU) return;   // the dialog started a load
+    if (Key(KEY_ENTER) || Key(KEY_SPACE)) pick = gMenuSel;
+    if (Key(KEY_DELETE) && count > 0 && gLibrary[gMenuSel].path != kDemoKey) {
+        gLibrary.erase(gLibrary.begin() + gMenuSel);   // forgets the song; the file itself is untouched
+        SaveLibrary();
+        return;
+    }
+    PickSong(pick);
 }
 
 static void DrawLoading()
 {
-    const int cx = gVW / 2;
-    const char* msg = gJob.stage.load() >= 2 ? "Listening to the music..." : "Opening the song...";
-    Text(msg, cx, 60, 10, kInk);
-    Text(Fit(gJob.name, 10, gVW - 80).c_str(), cx, 76, 10, kSoft);
+    const int cx = gVW / 2, y = gVH / 2 - 34;
+    Card(cx - 124, y, 248, 70, kPaper, kLine);
+    for (int i = 0; i < 3; i++) {
+        const float k = 0.5f + 0.5f * sinf(gScene.time * 6.0f - i * 1.1f);
+        Paw2((float)cx - 22 + i * 22, (float)y + 20 - 3.0f * k, 5.0f, Fade(kCoral, 0.35f + 0.65f * k));
+    }
+    Text(gJob.stage.load() >= 2 ? "Listening to the music..." : "Opening the song...", cx, y + 38, 10, kCocoa, 1, false);
+    Text(Fit(gJob.name, 10, 224).c_str(), cx, y + 52, 10, kCocoaSoft, 1, false);
 }
 
-static bool Stepper(int left, int y, int w, const char* label, const char* value, int& delta)
+static bool Stepper(int left, int y, int w, const char* label, const char* value, int& delta, int valueW = 50)
 {
     delta = 0;
-    Text(label, left, y + 4, 10, kInk, 0, false);
+    Text(label, left, y + 4, 10, kCocoa, 0, false);
     const int right = left + w;
     if (Button(right - 18, y, 18, 18, "+")) delta = 1;
-    if (Button(right - 86, y, 18, 18, "-")) delta = -1;
-    Text(value, right - 43, y + 4, 10, kInk, 1, false);
+    if (Button(right - 36 - valueW, y, 18, 18, "-")) delta = -1;
+    Text(value, right - 18 - valueW / 2, y + 4, 10, kCocoa, 1, false);
     return delta != 0;
 }
 
 static void DrawReady()
 {
     int left, top;
-    const int pw = 300, ph = 284;
+    const int pw = 300, ph = 300;
     Panel(pw, ph, left, top, true);
-    const int cx = left + pw / 2;
-    const int x0 = left + 16, inner = pw - 32;
+    const int cx = left + pw / 2, x0 = left + 16, inner = pw - 32;
 
-    Text(Fit(gSongName, 20, inner).c_str(), cx, top + 14, 20, kInk);
+    Text(Fit(gSongName, 20, inner).c_str(), cx, top + 12, 20, kCocoa, 1, false);
     const int secs = (int)gSong.duration;
-    Text(TextFormat("%d:%02d  -  %d things on the path", secs / 60, secs % 60, (int)gSong.charts[gCfg.diff].time.size()), cx, top + 40, 10, kSoft, 1, false);
+    Text(TextFormat("%d:%02d  -  %d things on the path", secs / 60, secs % 60, (int)gSong.charts[gCfg.diff].time.size()), cx, top + 38, 10, kCocoaSoft, 1, false);
+    const SongEntry* entry = FindSong(gSongPath);
+    if (entry && entry->best[gCfg.diff] >= 0.0f) {
+        const int rank = RankOf(entry->best[gCfg.diff]);
+        Text(TextFormat("best on %s:  %s  %.1f%%", kDiffName[gCfg.diff], kRankLetter[rank], entry->best[gCfg.diff] * 100.0f), cx, top + 51, 10, kRankColour[rank], 1, false);
+    } else {
+        Text(TextFormat("not played yet on %s", kDiffName[gCfg.diff]), cx, top + 51, 10, kCocoaSoft, 1, false);
+    }
 
     const int dw = (inner - 8) / 3;
     for (int d = 0; d < DIFF_COUNT; d++)
-        if (Button(x0 + d * (dw + 4), top + 60, dw, 22, kDiffName[d], gCfg.diff == d ? 2 : 0)) gCfg.diff = d;
+        if (Button(x0 + d * (dw + 4), top + 68, dw, 22, kDiffName[d], gCfg.diff == d ? 2 : 0)) gCfg.diff = d;
     if (Key(KEY_LEFT)) gCfg.diff = std::max(0, gCfg.diff - 1);
     if (Key(KEY_RIGHT)) gCfg.diff = std::min(DIFF_COUNT - 1, gCfg.diff + 1);
 
@@ -1825,26 +2558,28 @@ static void DrawReady()
     const int actions = kActionCount[gCfg.diff], slot = 66;
     for (int a = 0; a < actions; a++) {
         const int x = cx - actions * slot / 2 + a * slot;
-        ActionIcon(a, x + 10, top + 100);
-        Text(TextFormat("%s %s", kActionKey[a], kActionName[a]), x + 22, top + 96, 10, kInk, 0, false);
+        ActionIcon(a, x + 10, top + 106);
+        Text(TextFormat("%s %s", kActionKey[a], kActionName[a]), x + 22, top + 102, 10, kCocoa, 0, false);
     }
 
     int delta;
-    if (Stepper(x0, top + 120, inner, "Walking speed", TextFormat("%.1fx", gCfg.speed), delta))
+    if (Stepper(x0, top + 122, inner, "Walking speed", TextFormat("%.1fx", gCfg.speed), delta))
         gCfg.speed = std::clamp(std::round((gCfg.speed + delta * 0.1f) * 10.0f) / 10.0f, 0.6f, 2.0f);
-    if (Stepper(x0, top + 142, inner, "Audio offset", TextFormat("%+d ms", gCfg.offsetMs), delta))
+    if (Stepper(x0, top + 144, inner, "Audio offset", TextFormat("%+d ms", gCfg.offsetMs), delta))
         gCfg.offsetMs = std::clamp(gCfg.offsetMs + delta * 5, -300, 300);
-    if (Stepper(x0, top + 164, inner, "Sound effects", TextFormat("%d%%", gCfg.sfx * 10), delta))
+    if (Stepper(x0, top + 166, inner, "Sound effects", TextFormat("%d%%", gCfg.sfx * 10), delta))
         gCfg.sfx = std::clamp(gCfg.sfx + delta, 0, 10);
+    if (Stepper(x0, top + 188, inner, "Scenery", gCfg.scenery == 0 ? "Journey" : kBiomeName[gCfg.scenery - 1], delta, 112))
+        gCfg.scenery = (gCfg.scenery + delta + BIOME_COUNT + 1) % (BIOME_COUNT + 1);
 
     const int tw = (inner - 4) / 2;
-    if (Button(x0, top + 190, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
-    if (Button(x0 + tw + 4, top + 190, tw, 20, gCfg.hints ? "Key hints: on" : "Key hints: off", gCfg.hints ? 2 : 0)) gCfg.hints = !gCfg.hints;
+    if (Button(x0, top + 214, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
+    if (Button(x0 + tw + 4, top + 214, tw, 20, gCfg.hints ? "Key hints: on" : "Key hints: off", gCfg.hints ? 2 : 0)) gCfg.hints = !gCfg.hints;
 
-    if (Button(cx - 70, top + 220, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
+    if (Button(cx - 70, top + 242, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
         SaveSettings();
         StartGame();
-    } else if (Button(cx - 70, top + 252, 140, 18, "Choose another song") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 274, 140, 18, "Back to your songs") || Key(KEY_ESCAPE)) {
         gState = ST_MENU;
     }
 }
@@ -1924,7 +2659,7 @@ static void DrawPause()
     const int cx = gVW / 2;
     int left, top;
     Panel(190, 150, left, top);
-    Text("Paused", cx, top + 14, 20, kInk);
+    Text("Paused", cx, top + 14, 20, kCocoa, 1, false);
     if (Button(cx - 65, top + 48, 130, 26, "Resume", 1) || Key(KEY_ESCAPE) || Key(KEY_ENTER)) {
         gCountdown = 3.0f;
         gState = ST_COUNTDOWN;
@@ -1938,32 +2673,37 @@ static void DrawPause()
 static void DrawResults()
 {
     int left, top;
-    const int pw = 300, ph = 236;
+    const int pw = 300, ph = 250;
     Panel(pw, ph, left, top, true);
     const int cx = left + pw / 2;
 
     const float acc = Accuracy();
-    const int rank = acc >= 0.95f ? 0 : acc >= 0.88f ? 1 : acc >= 0.78f ? 2 : acc >= 0.65f ? 3 : 4;
-    static const char* kRank[5] = { "S", "A", "B", "C", "D" };
+    const int rank = RankOf(acc);
     static const char* kWords[5] = { "A purrfect evening", "A lovely walk", "A nice stroll", "A sleepy stroll", "More of a nap" };
-    static const Color kRankColor[5] = { { 255, 236, 150, 255 }, { 170, 255, 205, 255 }, { 160, 226, 255, 255 }, { 220, 190, 255, 255 }, { 255, 170, 180, 255 } };
-    Text(kRank[rank], cx, top + 12, 50, kRankColor[rank]);
-    Text(kWords[rank], cx, top + 64, 10, kInk, 1, false);
-    Text(Fit(gSongName, 10, pw - 32).c_str(), cx, top + 80, 10, kSoft, 1, false);
-    Text(TextFormat("%d", gScore), cx, top + 98, 20, kInk);
-    Text(TextFormat("%.1f%% in time  -  best streak %d", acc * 100.0f, gMaxCombo), cx, top + 124, 10, kInk, 1, false);
+    for (int ox = -2; ox <= 2; ox++)
+        for (int oy = -2; oy <= 3; oy++)
+            if (ox || oy) DrawText(kRankLetter[rank], cx - MeasureText(kRankLetter[rank], 50) / 2 + ox, top + 12 + oy, 50, kCocoa);
+    Text(kRankLetter[rank], cx, top + 12, 50, kRankColour[rank], 1, false);
+    if (gNewBest) {
+        Card(left + pw - 82, top + 12, 68, 18, kCoral, kCoralLine, false);
+        Text("new best!", left + pw - 48, top + 16, 10, kCream, 1, false);
+    }
+    Text(kWords[rank], cx, top + 66, 10, kCocoa, 1, false);
+    Text(Fit(gSongName, 10, pw - 32).c_str(), cx, top + 80, 10, kCocoaSoft, 1, false);
+    Text(TextFormat("%d", gScore), cx, top + 98, 20, kCocoa, 1, false);
+    Text(TextFormat("%.1f%% in time  -  best streak %d", acc * 100.0f, gMaxCombo), cx, top + 124, 10, kCocoa, 1, false);
 
     static const char* kLabel[4] = { "Purrfect", "Nice", "Ok", "Miss" };
     const int colW = (pw - 32) / 4;
     for (int i = 0; i < 4; i++) {
         const int x = left + 16 + colW * i + colW / 2;
-        Text(TextFormat("%d", gCount[i]), x, top + 144, 10, kInk, 1, false);
-        Text(kLabel[i], x, top + 157, 10, kSoft, 1, false);
+        Text(TextFormat("%d", gCount[i]), x, top + 146, 10, kCocoa, 1, false);
+        Text(kLabel[i], x, top + 159, 10, kCocoaSoft, 1, false);
     }
 
-    if (Button(cx - 70, top + 178, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
+    if (Button(cx - 70, top + 184, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
         StartGame();
-    } else if (Button(cx - 70, top + 208, 140, 18, "Back") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 216, 140, 18, "Back") || Key(KEY_ESCAPE)) {
         gState = ST_READY;
     }
 }
@@ -2037,13 +2777,13 @@ int main(int argc, char** argv)
     // <audio file>                    start with that song loaded
     // --selftest                      analysis and sound check, no window
     // --sfx-demo <wav>                writes a short audition of the sound effects
-    // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2]
+    // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2] [--scenery 0..5]
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
     std::string songPath;
     std::string shotView = "play";
     double shotAt = 12.0;
-    int winW = 1280, winH = 720, shotDiff = -1;
+    int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
         if (!strcmp(argv[i], "--sfx-demo") && i + 1 < argc) return WriteSfxDemo(argv[i + 1]) ? 0 : 1;
@@ -2051,6 +2791,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--view") && i + 1 < argc) shotView = argv[++i];
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) shotAt = atof(argv[++i]);
         else if (!strcmp(argv[i], "--diff") && i + 1 < argc) shotDiff = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--scenery") && i + 1 < argc) shotScenery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &winW, &winH);
         else if (argv[i][0] != '-') songPath = argv[i];
     }
@@ -2072,9 +2813,28 @@ int main(int argc, char** argv)
         PlayAudioStream(gPlayer.stream);
         gPlayer.hasStream = true;
         LoadSettings();
+        LoadLibrary();
         PlatformStartKeyInput(GetWindowHandle());
-    } else if (shotDiff >= 0) {
-        gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
+    } else {
+        if (shotDiff >= 0) gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
+        if (shotScenery >= 0) gCfg.scenery = std::clamp(shotScenery, 0, (int)BIOME_COUNT);
+        // Screenshots never touch the real library; the menu gets a sample shelf instead.
+        static const char* kSample[6] = { "Sunday Morning Tea", "Rooftop Lullaby", "Paper Lanterns", "Tiny Planet Waltz", "Rain on the Greenhouse", "Marmalade Skies" };
+        static const float kSampleBest[6] = { 0.97f, 0.91f, -1.0f, 0.82f, 0.70f, -1.0f };
+        for (int i = 0; i < 6; i++) {
+            SongEntry e;
+            e.path = kSample[i];
+            e.name = kSample[i];
+            e.duration = 150.0f + 23.0f * i;
+            e.best[1] = kSampleBest[i];
+            gLibrary.push_back(e);
+        }
+        SongEntry demo;
+        demo.path = kDemoKey;
+        demo.name = "Demo track";
+        demo.duration = 49.0f;
+        gLibrary.push_back(demo);
+        gMenuSel = 1;
     }
 
     BuildShapes();
