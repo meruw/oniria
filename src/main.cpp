@@ -702,6 +702,8 @@ static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sW
 static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sRingUp, sCatBlush;
 static Shape sRoof, sSnowCap, sSnowman, sPumpkin, sStump, sLeafPile, sHay, sStoneLantern, sLanternGlow, sBamboo, sGate;
 static Shape sPalmTrunk, sPalmLeaves, sUmbrella, sShell, sCastle, sBoat;
+static Shape sPoplar, sTuft, sWindmill, sBlades, sFence, sScarecrow, sBarn, sCrop, sReed, sDuck, sLily, sBridge;
+static Shape sLanternPole, sPaperLantern, sStall, sKoi, sIgloo, sLighthouse, sLighthouseLamp, sPier, sCrate, sBarrel, sSeaStack, sCrab;
 
 static const Vector3 kActionColor[ACT_COUNT] = { { 0.93f, 0.62f, 0.33f }, { 0.95f, 0.45f, 0.56f }, { 0.45f, 0.78f, 0.95f }, { 0.98f, 0.84f, 0.36f } };
 
@@ -884,6 +886,90 @@ static void BuildShapes()
     AddBeam(sBoat, { 0, 0.2f, 0 }, { 0, 1.5f, 0 }, 0.025f, wood);
     sBoat.push_back({ { 0.05f, 0.42f, 0 }, { 0.05f, 1.45f, 0 }, { 0.78f, 0.46f, 0 }, Rgb(255, 252, 244) });
     sBoat.push_back({ { -0.05f, 0.50f, 0 }, { -0.50f, 0.52f, 0 }, { -0.05f, 1.20f, 0 }, Rgb(250, 190, 170) });
+
+    // --- Things for the variations ----------------------------------------
+    const Vector3 plank = Rgb(196, 160, 124), X = { 1, 0, 0 }, Z = { 0, 0, 1 };
+    AddBlob(sPoplar, { 0, 1.75f, 0 }, { 0.42f, 1.15f, 0.42f }, Rgb(255, 255, 255));
+    for (int i = 0; i < 3; i++) AddCone(sTuft, { (i - 1) * 0.09f, 0, (i & 1) * 0.06f }, 0.07f, 0.2f + 0.05f * i, 3, Rgb(255, 255, 255), i * 1.1f);
+
+    {   // Windmill: a tapering tower; the blades are a separate shape so they can turn.
+        const LoftRing tower[2] = { { { 0, 0, 0 }, 0.6f, 0.6f }, { { 0, 2.0f, 0 }, 0.38f, 0.38f } };
+        AddLoft(sWindmill, tower, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return Rgb(246, 236, 220); });
+        AddCone(sWindmill, { 0, 2.0f, 0 }, 0.5f, 0.55f, 6, Rgb(170, 110, 96));
+        AddBox(sWindmill, { 0, 0.3f, 0.56f }, { 0.14f, 0.3f, 0.03f }, wood);
+        Shape blade;
+        AddBox(blade, { 0.78f, 0, 0 }, { 0.68f, 0.1f, 0.02f }, Rgb(252, 246, 236));
+        AddBox(blade, { 0.5f, 0, -0.01f }, { 0.5f, 0.02f, 0.02f }, wood);
+        for (int i = 0; i < 4; i++) AddShape(sBlades, blade, MatrixRotateZ(i * kPi / 2));
+        AddBlob(sBlades, { 0, 0, 0 }, { 0.1f, 0.1f, 0.06f }, wood);
+    }
+    for (int i = 0; i < 2; i++) AddBox(sFence, { 0.2f + i * 1.2f, 0.3f, 0 }, { 0.045f, 0.3f, 0.045f }, plank);
+    AddBox(sFence, { 1.2f, 0.44f, 0 }, { 1.2f, 0.03f, 0.02f }, plank);
+    AddBox(sFence, { 1.2f, 0.22f, 0 }, { 1.2f, 0.03f, 0.02f }, plank);
+
+    AddBox(sScarecrow, { 0, 0.6f, 0 }, { 0.035f, 0.6f, 0.035f }, wood);
+    AddBox(sScarecrow, { 0, 0.88f, 0 }, { 0.46f, 0.035f, 0.035f }, wood);
+    AddBox(sScarecrow, { 0, 0.74f, 0 }, { 0.17f, 0.2f, 0.08f }, Rgb(206, 96, 84));
+    AddBlob(sScarecrow, { 0, 1.2f, 0 }, { 0.15f, 0.15f, 0.15f }, Rgb(236, 206, 140));
+    AddCone(sScarecrow, { 0, 1.28f, 0 }, 0.25f, 0.22f, 6, Rgb(150, 110, 84));
+
+    AddBox(sBarn, { 0, 0.75f, 0 }, { 1.2f, 0.75f, 0.9f }, Rgb(196, 84, 74));
+    AddCone(sBarn, { 0, 1.5f, 0 }, 1.75f, 0.8f, 4, Rgb(120, 80, 84), kPi / 4);
+    AddBox(sBarn, { 0, 0.5f, 0.91f }, { 0.36f, 0.5f, 0.02f }, Rgb(250, 240, 226));
+    AddBox(sBarn, { 0, 1.2f, 0.91f }, { 0.16f, 0.12f, 0.02f }, Rgb(250, 240, 226));
+
+    for (int i = 0; i < 4; i++) AddCone(sCrop, { i * 0.52f - 0.78f, 0, 0 }, 0.17f, 0.32f, 3, Rgb(255, 255, 255), i * 0.8f);
+    for (int i = 0; i < 3; i++) {
+        const float x = (i - 1) * 0.1f, top = 0.7f + 0.12f * i;
+        AddBeam(sReed, { x, 0, i * 0.04f }, { x + 0.04f, top, i * 0.04f }, 0.012f, Rgb(120, 170, 100));
+        AddBox(sReed, { x + 0.04f, top, i * 0.04f }, { 0.028f, 0.09f, 0.028f }, Rgb(140, 100, 76));
+    }
+    AddBlob(sDuck, { 0, 0.09f, 0 }, { 0.16f, 0.1f, 0.11f }, Rgb(252, 250, 244));
+    AddBlob(sDuck, { 0.13f, 0.22f, 0 }, { 0.07f, 0.07f, 0.07f }, Rgb(252, 250, 244));
+    AddBox(sDuck, { 0.21f, 0.21f, 0 }, { 0.04f, 0.015f, 0.03f }, Rgb(244, 160, 70));
+    AddBlob(sLily, { 0, 0.012f, 0 }, { 0.2f, 0.014f, 0.2f }, Rgb(96, 170, 110));
+    AddBlob(sLily, { 0.03f, 0.05f, 0 }, { 0.06f, 0.045f, 0.06f }, Rgb(252, 180, 200));
+
+    for (int i = -2; i <= 2; i++) {   // An arched bridge across the river; tinted when drawn.
+        const float y = 0.42f - 0.07f * i * i, z = i * 0.84f;
+        AddBox(sBridge, { 0, y, z }, { 0.42f, 0.05f, 0.44f }, Rgb(255, 255, 255));
+        for (int side = -1; side <= 1; side += 2) {
+            AddBox(sBridge, { side * 0.4f, y + 0.22f, z }, { 0.03f, 0.2f, 0.03f }, Rgb(232, 232, 232));
+            AddBox(sBridge, { side * 0.4f, y + 0.42f, z }, { 0.025f, 0.025f, 0.44f }, Rgb(232, 232, 232));
+        }
+    }
+
+    AddBeam(sLanternPole, { 0, 0, 0 }, { 0, 2.3f, 0 }, 0.03f, wood);
+    AddBlob(sPaperLantern, { 0, 0, 0 }, { 0.14f, 0.17f, 0.14f }, Rgb(255, 255, 255));
+    AddBox(sPaperLantern, { 0, 0.17f, 0 }, { 0.06f, 0.02f, 0.06f }, Rgb(90, 64, 70));
+    AddBox(sPaperLantern, { 0, -0.17f, 0 }, { 0.06f, 0.02f, 0.06f }, Rgb(90, 64, 70));
+    AddBox(sStall, { 0, 0.4f, 0 }, { 0.6f, 0.4f, 0.3f }, plank);
+    for (int side = -1; side <= 1; side += 2) AddBox(sStall, { side * 0.55f, 1.1f, 0.25f }, { 0.03f, 0.4f, 0.03f }, wood);
+    for (int i = -1; i <= 1; i++) AddBox(sStall, { i * 0.5f, 1.52f, 0.05f }, { 0.25f, 0.05f, 0.5f }, i ? Rgb(238, 112, 112) : Rgb(255, 246, 230));
+    AddBlob(sKoi, { 0, 0, 0 }, { 0.16f, 0.035f, 0.07f }, Rgb(244, 150, 70));
+    AddBlob(sKoi, { -0.15f, 0, 0 }, { 0.07f, 0.03f, 0.05f }, Rgb(252, 246, 236));
+    AddBlob(sIgloo, { 0, 0, 0 }, { 0.9f, 0.72f, 0.9f }, snow);
+    AddBox(sIgloo, { 0, 0.2f, 0.86f }, { 0.22f, 0.22f, 0.14f }, Rgb(96, 110, 150));
+
+    {   // Lighthouse: red and white bands, a gallery, a lamp room and a cap.
+        const LoftRing tower[4] = { { { 0, 0, 0 }, 0.5f, 0.5f }, { { 0, 1.2f, 0 }, 0.42f, 0.42f }, { { 0, 2.4f, 0 }, 0.34f, 0.34f }, { { 0, 3.4f, 0 }, 0.28f, 0.28f } };
+        AddLoft(sLighthouse, tower, 4, 8, X, Z, [&](int span, int, float) -> Vector3 { return span == 1 ? Rgb(226, 96, 96) : Rgb(252, 248, 240); });
+        AddBox(sLighthouse, { 0, 3.45f, 0 }, { 0.4f, 0.05f, 0.4f }, Rgb(90, 80, 100));
+        AddCone(sLighthouse, { 0, 4.0f, 0 }, 0.34f, 0.35f, 8, Rgb(226, 96, 96));
+        AddBox(sLighthouseLamp, { 0, 3.75f, 0 }, { 0.22f, 0.25f, 0.22f }, Rgb(255, 236, 170));
+    }
+    AddBox(sPier, { 0, 0.2f, -3.5f }, { 0.5f, 0.05f, 3.5f }, plank);
+    for (int i = 0; i < 5; i++)
+        for (int side = -1; side <= 1; side += 2)
+            AddBox(sPier, { side * 0.45f, -0.3f, -0.3f - i * 1.65f }, { 0.06f, 0.55f, 0.06f }, wood);
+    AddBox(sCrate, { 0, 0.2f, 0 }, { 0.2f, 0.2f, 0.2f }, plank);
+    AddBox(sCrate, { 0, 0.2f, 0 }, { 0.21f, 0.03f, 0.21f }, wood);
+    AddCylinder(sBarrel, { 0, 0, 0 }, 0.18f, 0.45f, 8, Rgb(150, 104, 84), Rgb(196, 160, 124));
+    AddBlob(sSeaStack, { 0, 0.6f, 0 }, { 0.7f, 1.0f, 0.6f }, Rgb(150, 140, 146));
+    AddBlob(sSeaStack, { 0.3f, 1.5f, 0.1f }, { 0.45f, 0.6f, 0.4f }, Rgb(164, 154, 158));
+    AddBlob(sSeaStack, { -0.6f, 0.2f, 0.2f }, { 0.35f, 0.3f, 0.3f }, Rgb(140, 132, 140));
+    AddBlob(sCrab, { 0, 0.06f, 0 }, { 0.12f, 0.06f, 0.09f }, Rgb(232, 96, 84));
+    for (int side = -1; side <= 1; side += 2) AddBox(sCrab, { side * 0.14f, 0.1f, 0.04f }, { 0.04f, 0.04f, 0.03f }, Rgb(232, 96, 84));
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,34 +1177,68 @@ static BiomeLook LookOf(int biome)
     switch (biome) {
         case BIOME_BLOSSOM: return { Rgb(142, 200, 150), Rgb(228, 216, 200), Rgb(255, 206, 226), 0.20f };
         case BIOME_AUTUMN:  return { Rgb(198, 172, 98), Rgb(216, 172, 122), Rgb(255, 200, 140), 0.16f };
-        case BIOME_SNOW:    return { Rgb(238, 244, 252), Rgb(204, 220, 240), Rgb(214, 226, 244), 0.34f };
+        case BIOME_SNOW:    return { Rgb(238, 244, 252), Rgb(160, 184, 220), Rgb(214, 226, 244), 0.34f };
         case BIOME_SEASIDE: return { Rgb(242, 224, 172), Rgb(200, 164, 124), Rgb(140, 224, 232), 0.20f };
         default:            return { Rgb(140, 196, 110), Rgb(232, 206, 160), Rgb(255, 255, 255), 0.0f };
     }
 }
 
-struct BiomeMix { int a, b; float t; };   // somewhere between place `a` and place `b`
+// Each place comes in three variations with their own landmarks and props:
+//   Meadow          flower fields, farmland, riverside
+//   Blossom garden  garden, stream and bridges, lantern festival
+//   Autumn woods    deep woods, pumpkin patch, harvest village
+//   Snowy village   village, frozen river, pine forest under the aurora
+//   Seaside         beach, harbour, rocky cove
+static const char* kVariantName[BIOME_COUNT][3] = {
+    { "flower fields", "farmland", "riverside" },
+    { "garden", "stream", "lantern festival" },
+    { "deep woods", "pumpkin patch", "harvest village" },
+    { "village", "frozen river", "pine forest" },
+    { "beach", "harbour", "rocky cove" },
+};
+
+struct BiomeMix { int a, b; float t; int va, vb; };   // between place `a` (variation `va`) and place `b` (variation `vb`)
 
 static int   gFirstBiome = 0;        // where the current song's journey starts
 static float gBiomeSpan = 150.0f;    // world units spent in each place during a song
+static int   gVariantSeed = 0;       // which variation the first stop uses
+static int   gForceVariant = -1;     // screenshot option
 
 static BiomeMix BiomeAt(float x)
 {
     const bool song = PathFollowsSong();
-    if (song && gCfg.scenery > 0) return BiomeMix{ gCfg.scenery - 1, gCfg.scenery - 1, 0.0f };
     const float span = song ? gBiomeSpan : 60.0f;
     const float f = std::max(0.0f, x) / span;
-    const int stop = (int)floorf(f), first = song ? gFirstBiome : 0;
-    // Stepping by two visits all five before repeating, and never puts similar places side by side.
-    const int a = (first + stop * 2) % BIOME_COUNT, b = (first + (stop + 1) * 2) % BIOME_COUNT;
-    const float edge = 9.0f / span;   // the last nine units blend into the next place
+    const int stop = (int)floorf(f), first = song ? gFirstBiome : 0, seed = song ? gVariantSeed : 0;
+    const float edge = 9.0f / span;   // the last nine units blend into the next stop
     float t = std::clamp((f - (float)stop - (1.0f - edge)) / edge, 0.0f, 1.0f);
     t = t * t * (3.0f - 2.0f * t);
-    return BiomeMix{ a, b, t };
+
+    BiomeMix m;
+    if (song && gCfg.scenery > 0) {
+        m.a = m.b = gCfg.scenery - 1;   // one place for the whole song; its variations still take turns
+    } else {
+        // Stepping by two visits all five places before repeating, and never puts similar ones side by side.
+        m.a = (first + stop * 2) % BIOME_COUNT;
+        m.b = (first + (stop + 1) * 2) % BIOME_COUNT;
+    }
+    m.va = gForceVariant >= 0 ? gForceVariant : (seed + stop) % 3;
+    m.vb = gForceVariant >= 0 ? gForceVariant : (seed + stop + 1) % 3;
+    m.t = t;
+    return m;
 }
 
 static float BiomeWeight(const BiomeMix& m, int biome) { return (m.a == biome ? 1.0f - m.t : 0.0f) + (m.b == biome ? m.t : 0.0f); }
 static int   BiomeNear(float x) { const BiomeMix m = BiomeAt(x); return m.t < 0.5f ? m.a : m.b; }
+static int   VariantNear(float x) { const BiomeMix m = BiomeAt(x); return m.t < 0.5f ? m.va : m.vb; }
+
+// Three variations put a river (or a frozen one) behind the path.
+static bool  HasRiver(int biome, int variant)
+{
+    return (biome == BIOME_MEADOW && variant == 2) || (biome == BIOME_BLOSSOM && variant == 1) || (biome == BIOME_SNOW && variant == 1);
+}
+static float RiverWeight(const BiomeMix& m) { return (HasRiver(m.a, m.va) ? 1.0f - m.t : 0.0f) + (HasRiver(m.b, m.vb) ? m.t : 0.0f); }
+static float RiverLevel(float x);
 
 // Ground colours at world x: the place decides the hue, the time of day the shading.
 static void GroundColours(float x, Vector3& grass, Vector3& path)
@@ -1143,6 +1263,8 @@ static float PathHeight(float x)
     return 0.5f * (2 * p1 + (p2 - p0) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u * u + (3 * p1 - p0 - 3 * p2 + p3) * u * u * u);
 }
 
+static float RiverLevel(float x) { return PathHeight(x) - 0.4f; }
+
 static float GroundHeight(float x, float z)
 {
     const float path = PathHeight(x);
@@ -1151,13 +1273,22 @@ static float GroundHeight(float x, float z)
     const float slope = z < 0.0f ? std::max(0.0f, -z - 3.0f) * 0.11f : -std::max(0.0f, z - 1.6f) * 0.16f;
     float h = path + away * away * (3 - 2 * away) * bumps + slope;
 
-    // At the seaside the land behind the path runs down a beach to a flat sea.
     if (z < 0.0f) {
-        const float sea = BiomeWeight(BiomeAt(x), BIOME_SEASIDE);
+        const BiomeMix m = BiomeAt(x);
+        // At the seaside the land behind the path runs down a beach to a flat sea.
+        const float sea = BiomeWeight(m, BIOME_SEASIDE);
         if (sea > 0.0f) {
             const float k = std::clamp((-z - 1.5f) / 6.0f, 0.0f, 1.0f), shore = k * k * (3 - 2 * k);
             const float beach = path + (kSeaLevel - path) * shore + 0.12f * bumps * (1.0f - shore);
             h += (beach - h) * sea;
+        }
+        // A river cuts a flat channel between z = -5 and z = -8, with banks on both sides.
+        const float river = RiverWeight(m);
+        if (river > 0.0f) {
+            float in = std::clamp((-z - 2.6f) / 2.0f, 0.0f, 1.0f), out = std::clamp((-z - 8.4f) / 2.6f, 0.0f, 1.0f);
+            in = in * in * (3 - 2 * in);
+            out = out * out * (3 - 2 * out);
+            h += (path - 0.4f - h) * river * in * (1.0f - out);
         }
     }
     return h;
@@ -1357,6 +1488,7 @@ static void StartGame()
     uint32_t nameHash = 2166136261u;
     for (unsigned char c : gSongName) nameHash = (nameHash ^ c) * 16777619u;
     gFirstBiome = (int)(nameHash % BIOME_COUNT);
+    gVariantSeed = (int)((nameHash >> 8) % 3);
     const int places = std::clamp((int)std::lround(gSong.duration / 30.0), 1, (int)BIOME_COUNT);
     gBiomeSpan = (float)(gSong.duration / places) * kScrollBase * gCfg.speed;
     gJudgeKind = -1;
@@ -1798,6 +1930,91 @@ static void JoyParticles(float horizonY, bool front)
     }
 }
 
+// What stands on the horizon in each place, drawn flat behind the hills:
+// balloons over the meadow, a great mountain behind the garden, a flight of
+// birds in autumn, snowy peaks (and at night an aurora) in the snow, islands at sea.
+static void PlaceBackdrop(float horizonY)
+{
+    const Palette& p = gPalette;
+    const Scene& s = gScene;
+    const BiomeMix m = BiomeAt(s.worldX + 2.5f);
+    const float base = horizonY + 4.0f, time = s.time;
+    const Vector3 distant = Mix(p.skyBottom, p.skyTop, 0.45f);
+
+    const float meadow = BiomeWeight(m, BIOME_MEADOW);
+    if (meadow > 0.02f) {   // hot-air balloons
+        static const Color kStripe[3][2] = { { { 240, 120, 120, 255 }, { 255, 240, 220, 255 } }, { { 110, 180, 230, 255 }, { 255, 236, 170, 255 } }, { { 250, 190, 90, 255 }, { 250, 250, 250, 255 } } };
+        for (int i = 0; i < 3; i++) {
+            const float x = Wrap(Hash01(i, 301) * gVW + time * (2.0f + i) - s.worldX * 1.2f, gVW + 80.0f) - 40.0f;
+            const float y = horizonY * (0.2f + 0.3f * Hash01(i, 302)) + 3.0f * sinf(time * 0.5f + i * 2.0f);
+            Poly2(x, y, 9, 11, 10, 0, Fade(kStripe[i][0], meadow));
+            Poly2(x, y, 4, 11, 8, 0, Fade(kStripe[i][1], meadow));
+            DrawLineEx(Vector2{ x - 5, y + 9 }, Vector2{ x - 2, y + 15 }, 1.0f, Fade(Color{ 92, 64, 72, 255 }, meadow));
+            DrawLineEx(Vector2{ x + 5, y + 9 }, Vector2{ x + 2, y + 15 }, 1.0f, Fade(Color{ 92, 64, 72, 255 }, meadow));
+            DrawRectangle((int)x - 2, (int)y + 15, 5, 4, Fade(Color{ 150, 106, 84, 255 }, meadow));
+        }
+    }
+
+    const float blossom = BiomeWeight(m, BIOME_BLOSSOM);
+    if (blossom > 0.02f) {  // one great snow-capped mountain
+        const float x = Wrap(gVW * 0.62f - s.worldX * 0.8f, gVW + 420.0f) - 210.0f, height = horizonY * 0.66f, half = 150.0f;
+        const Vector2 peak = { x, base - height };
+        DrawTriangle(Vector2{ x - half, base }, Vector2{ x + half, base }, peak, ToColor(Mix(distant, Vector3{ 0.5f, 0.52f, 0.72f }, 0.35f), blossom));
+        const float cap = 0.3f;   // the snow line, as a fraction of the height
+        const Vector2 l = { x - half * cap, base - height * (1 - cap) }, r = { x + half * cap, base - height * (1 - cap) };
+        const Color snow = ToColor(Mix(Vector3{ 1, 1, 1 }, p.skyTop, 0.15f), blossom);
+        DrawTriangle(l, r, peak, snow);
+        for (int i = 0; i < 3; i++) {   // a ragged lower edge
+            const float u0 = i / 3.0f, u1 = (i + 1) / 3.0f;
+            DrawTriangle(Vector2{ l.x + (r.x - l.x) * u0, l.y }, Vector2{ l.x + (r.x - l.x) * (u0 + u1) * 0.5f, l.y + 7.0f }, Vector2{ l.x + (r.x - l.x) * u1, l.y }, snow);
+        }
+    }
+
+    const float snowy = BiomeWeight(m, BIOME_SNOW);
+    if (snowy > 0.02f) {    // a jagged range with white tops
+        const float width = 130.0f, scroll = s.worldX * 1.2f;
+        const int first = (int)floorf(scroll / width) - 1;
+        for (int j = first; j < first + (int)(gVW / width) + 4; j++) {
+            const float x = j * width - scroll, height = horizonY * (0.34f + 0.3f * Hash01(j, 311)), half = width * 0.72f;
+            const Vector2 peak = { x + (Hash01(j, 312) - 0.5f) * 30.0f, base - height };
+            DrawTriangle(Vector2{ x - half, base }, Vector2{ x + half, base }, peak, ToColor(Mix(distant, Vector3{ 0.56f, 0.62f, 0.8f }, 0.4f), snowy));
+            const Vector2 l = { peak.x - (peak.x - (x - half)) * 0.34f, peak.y + height * 0.34f }, r = { peak.x + ((x + half) - peak.x) * 0.34f, peak.y + height * 0.34f };
+            DrawTriangle(l, r, peak, ToColor(Mix(Vector3{ 1, 1, 1 }, p.skyTop, 0.2f), snowy));
+        }
+        // In the pine forest, once it is dark, the aurora comes out.
+        const float aurora = p.stars * ((m.a == BIOME_SNOW && m.va == 2 ? 1.0f - m.t : 0.0f) + (m.b == BIOME_SNOW && m.vb == 2 ? m.t : 0.0f));
+        if (aurora > 0.02f) {
+            for (int band = 0; band < 2; band++) {
+                const Color glow = band ? Color{ 190, 150, 255, 255 } : Color{ 130, 255, 196, 255 };
+                for (int i = 0; i * 6 < gVW; i++) {
+                    const float y = horizonY * (0.3f + 0.16f * band) + 12.0f * sinf(i * 0.21f + time * 0.5f + band * 2.0f) + 6.0f * sinf(i * 0.53f - time * 0.3f);
+                    const float h = 24.0f + 10.0f * sinf(i * 0.37f + time * 0.8f + band);
+                    DrawRectangleGradientV(i * 6, (int)(y - h), 6, (int)h, Fade(glow, 0.0f), Fade(glow, 0.34f * aurora * (0.7f + 0.3f * s.high)));
+                }
+            }
+        }
+    }
+
+    const float sea = BiomeWeight(m, BIOME_SEASIDE);
+    if (sea > 0.02f) {      // low islands on the horizon
+        for (int i = 0; i < 3; i++) {
+            const float x = Wrap(Hash01(i, 321) * (gVW + 200.0f) - s.worldX * 1.0f, gVW + 200.0f) - 100.0f;
+            Poly2(x, base - 1.0f, 34.0f + 26.0f * Hash01(i, 322), 9.0f + 5.0f * Hash01(i, 323), 9, 0, ToColor(Mix(distant, Vector3{ 0.3f, 0.5f, 0.56f }, 0.4f), sea));
+        }
+    }
+
+    const float autumn = BiomeWeight(m, BIOME_AUTUMN);
+    if (autumn > 0.02f) {   // birds heading south in a V
+        const float lead = Wrap(time * 9.0f - s.worldX * 0.5f, gVW + 160.0f) - 80.0f, y0 = horizonY * 0.3f + 4.0f * sinf(time * 0.4f);
+        const Color c = Fade(Color{ 70, 50, 60, 255 }, 0.8f * autumn);
+        for (int i = -3; i <= 3; i++) {
+            const float x = lead - abs(i) * 9.0f, y = y0 + i * 5.0f, flap = 1.5f + 1.5f * sinf(time * 6.0f + i);
+            DrawLineEx(Vector2{ x - 4, y - flap }, Vector2{ x, y }, 1.0f, c);
+            DrawLineEx(Vector2{ x, y }, Vector2{ x + 4, y - flap }, 1.0f, c);
+        }
+    }
+}
+
 // Sky, sun and moon, stars, clouds and two rows of distant hills, all flat 2D.
 static void DrawSky(float horizonY)
 {
@@ -1846,6 +2063,8 @@ static void DrawSky(float horizonY)
         Poly2(x - w * 0.45f, y + 4, w * 0.6f, w * 0.22f, 7, 0.5f, ToColor(cloud, 0.9f));
     }
 
+    PlaceBackdrop(horizonY);
+
     for (int layer = 0; layer < 2; layer++) {
         const float width = layer == 0 ? 96.0f : 64.0f, scroll = s.worldX * (layer == 0 ? 2.0f : 4.5f);
         const Vector3 col = Mix(p.skyBottom, Mix(p.grass, p.skyTop, 0.5f), layer == 0 ? 0.3f : 0.55f);
@@ -1880,23 +2099,30 @@ static void DrawTerrain()
     for (int x = x0; x < x1; x++) {
         Vector3 grass, pathCol;
         GroundColours((float)x + 0.5f, grass, pathCol);
-        const float sea = BiomeWeight(BiomeAt((float)x + 0.5f), BIOME_SEASIDE);
+        const BiomeMix mix = BiomeAt((float)x + 0.5f);
+        const int here = mix.t < 0.5f ? mix.a : mix.b;
+        const float sea = BiomeWeight(mix, BIOME_SEASIDE), river = RiverWeight(mix);
+        // Paths have a rhythm of their own: boardwalk planks by the sea, stone slabs in the garden.
+        const float pathBeat = (here == BIOME_SEASIDE || here == BIOME_BLOSSOM) && (x & 1) ? 0.9f : 1.0f;
         for (int r = 0; r + 1 < rowCount; r++) {
             const float za = rows[r], zb = rows[r + 1];
             const Vector3 v00 = { (float)x, GroundHeight((float)x, za), za }, v10 = { (float)x + 1, GroundHeight((float)x + 1, za), za };
             const Vector3 v01 = { (float)x, GroundHeight((float)x, zb), zb }, v11 = { (float)x + 1, GroundHeight((float)x + 1, zb), zb };
-            const bool path = za == 1.0f, water = sea > 0.5f && za <= -8.0f;
+            const bool path = za == 1.0f, seaCell = sea > 0.5f && za <= -8.0f, riverCell = river > 0.5f && za == -5.0f;
             const float shade = 0.92f + 0.16f * Hash01(x, r);
             Vector3 colA, colB;
             float glow = 0.0f;
-            if (water) {
-                // Bands of lighter water drift across the sea.
+            if (seaCell || riverCell) {
+                // Bands of lighter water drift across; ice just glints.
                 const float wave = 0.5f + 0.5f * sinf(x * 0.7f + r * 1.9f + gScene.time * 1.3f);
-                colA = Vector3Multiply(Mix(Rgb(64, 164, 198), Rgb(150, 222, 232), wave * 0.6f), gShadePath);
+                const bool ice = riverCell && here == BIOME_SNOW;
+                const Vector3 deep = ice ? Rgb(190, 222, 242) : riverCell ? Rgb(84, 172, 196) : Rgb(64, 164, 198);
+                const Vector3 pale = ice ? Rgb(232, 244, 252) : Rgb(150, 222, 232);
+                colA = Vector3Multiply(Mix(deep, pale, ice ? 0.5f * Hash01(x, 77) : wave * 0.6f), gShadePath);
                 colB = Vector3Scale(colA, 0.94f);
-                glow = 0.35f;
+                glow = ice ? 0.2f : 0.35f;
             } else {
-                const Vector3 base = path ? pathCol : Mix(grass, Vector3Scale(grass, 0.82f), (float)r / rowCount);
+                const Vector3 base = path ? Vector3Scale(pathCol, pathBeat) : Mix(grass, Vector3Scale(grass, 0.82f), (float)r / rowCount);
                 colA = Vector3Scale(base, shade);
                 colB = Vector3Scale(base, shade * (path ? 0.96f : 0.93f));
             }
@@ -1909,18 +2135,19 @@ static void DrawTerrain()
 // Soft discs of light around lamps, windows and rung bells. Collected while
 // the solid world is drawn and blended on top afterwards.
 struct Halo { Vector3 pos; float radius; Vector3 col; float alpha; };
-static Halo gHalos[96];
+static Halo gHalos[220];
 static int  gHaloCount = 0;
 static const Vector3 kWarm = { 1.0f, 0.86f, 0.55f };
 
 static void AddHalo(Vector3 pos, float radius, Vector3 col, float alpha)
 {
-    if (gHaloCount < 96 && alpha > 0.01f) gHalos[gHaloCount++] = { pos, radius, col, alpha };
+    if (gHaloCount < 220 && alpha > 0.01f) gHalos[gHaloCount++] = { pos, radius, col, alpha };
 }
 
 // Trees, houses and small things, placed by hashing the position so the same
 // stretch of path always looks the same. What grows there depends on the
-// place. Everything bops a little on the beat.
+// place and on which of its three variations this stretch is. Everything bops
+// a little on the beat.
 static void DrawScenery()
 {
     static const Vector3 kLeaf[5] = { { 0.47f, 0.72f, 0.42f }, { 0.38f, 0.64f, 0.44f }, { 0.60f, 0.76f, 0.40f }, { 0.96f, 0.66f, 0.42f }, { 0.96f, 0.62f, 0.68f } };
@@ -1928,21 +2155,26 @@ static void DrawScenery()
     static const Vector3 kFall[4] = { { 0.98f, 0.62f, 0.30f }, { 0.90f, 0.38f, 0.30f }, { 0.98f, 0.80f, 0.36f }, { 0.72f, 0.46f, 0.30f } };
     static const Vector3 kBlossom[3] = { { 1.0f, 0.72f, 0.82f }, { 1.0f, 0.88f, 0.92f }, { 0.98f, 0.62f, 0.78f } };
     static const Vector3 kShellTint[3] = { { 1.0f, 0.6f, 0.56f }, { 1.0f, 0.82f, 0.5f }, { 0.96f, 0.7f, 0.86f } };
+    static const Vector3 kLantern[4] = { { 1.0f, 0.46f, 0.42f }, { 1.0f, 0.86f, 0.46f }, { 1.0f, 0.66f, 0.80f }, { 1.0f, 0.96f, 0.86f } };
     const Palette& p = gPalette;
     const float bop = 1.0f + (0.07f + 0.18f * gJoy) * gScene.beat;   // everything dances harder on a streak
     const float lit = std::max(p.lamps, gJoy * 0.7f);                // and lamps come on even by day
     const Vector3 white = { 1, 1, 1 };
     const Vector3 night = Mix(white, Vector3{ 0.7f, 0.8f, 1.0f }, p.stars);   // leaves cool down after dark
     const Vector3 tiles = { 0.80f, 0.42f, 0.36f }, snowTint = { 0.95f, 0.97f, 1.0f }, pineGreen = { 0.30f, 0.50f, 0.42f };
+    const Vector3 redPaint = { 0.86f, 0.36f, 0.30f }, timber = { 0.76f, 0.60f, 0.46f };
     const float spacing = 2.4f, time = gScene.time;
     const int s0 = (int)floorf((gViewCentre - gViewHalf * 2.7f - 3.0f) / spacing), s1 = (int)floorf((gViewCentre + gViewHalf * 2.7f + 3.0f) / spacing);
 
     for (int s = s0; s <= s1; s++) {
         const float fx = s * spacing;
         const float sway = 0.08f * gJoy * sinf(time * 3.2f + fx);
-        const int biome = BiomeNear(fx + 1.2f);
+        const BiomeMix mix = BiomeAt(fx + 1.2f);
+        const int biome = mix.t < 0.5f ? mix.a : mix.b, variant = mix.t < 0.5f ? mix.va : mix.vb;
+        const bool river = HasRiver(biome, variant);
 
         auto ground = [](float x, float z) { return Vector3{ x, GroundHeight(x, z), z }; };
+        auto afloat = [](float x, float z, float lift) { return Vector3{ x, RiverLevel(x) + lift, z }; };
         auto tree = [&](Vector3 at, float size, const Shape& top, Vector3 leaf) {
             DrawShape(sTrunk, Place(at, size, sway));
             DrawShape(top, Place(at, size, sway, bop), Vector3Multiply(leaf, night));
@@ -1957,56 +2189,119 @@ static void DrawScenery()
             DrawShape(sRoof, Place(at, 1.25f), Vector3Multiply(roof, night));
             DrawShape(sWindows, Place(at, 1.25f), white, 0.2f + 0.8f * glow);
             AddHalo(Vector3{ at.x + 0.38f, at.y + 0.88f, at.z + 1.0f }, 0.55f, kWarm, 0.12f * glow);
+            for (int k = 0; k < 3; k++) {   // smoke curling out of the chimney
+                const float puff = fmodf(time * 0.22f + k / 3.0f + Hash01(s, 33), 1.0f);
+                AddHalo(Vector3{ at.x + 0.62f + 0.3f * puff, at.y + 2.5f + 1.3f * puff, at.z - 0.25f }, 0.14f + 0.24f * puff, Vector3{ 0.96f, 0.96f, 1.0f }, 0.3f * (1.0f - puff));
+            }
         };
-        auto flowers = [&](Vector3 at, int count) {
+        auto flowers = [&](Vector3 at, int count, float spread) {
             for (int k = 0; k < count; k++) {
-                const float ox = at.x + (Hash01(s, 50 + k) - 0.5f) * 0.8f, oz = at.z + (Hash01(s, 60 + k) - 0.5f) * 0.6f;
+                const float ox = at.x + (Hash01(s, 50 + k) - 0.5f) * spread, oz = at.z + (Hash01(s, 60 + k) - 0.5f) * spread * 0.75f;
                 DrawShape(sFlower, Place(ground(ox, oz), 1.0f, sway, bop), kPetal[Hash(s, 70 + k) & 3]);
             }
         };
+        auto fence = [&](float z) { DrawShape(sFence, Place(ground(fx, z), 1.0f, atanf((GroundHeight(fx + 2.4f, z) - GroundHeight(fx, z)) / 2.4f))); };
 
-        // Four bands by depth: beside the path, the middle distance, far away, and in front.
-        const float rNear = Hash01(s, 2), rMid = Hash01(s, 8), rFar = Hash01(s, 14), rFront = Hash01(s, 24);
+        // Bands by depth: beside the path, the middle distance, far away, and in front.
+        // With a river behind the path the middle band moves up onto the near bank.
+        const float rNear = Hash01(s, 2), rMid = Hash01(s, 8), rFar = Hash01(s, 14), rFront = Hash01(s, 24), rExtra = Hash01(s, 30);
         const Vector3 nearAt = ground(fx + Hash01(s, 3) * 1.8f, -1.9f - Hash01(s, 4) * 1.3f);
-        const Vector3 midAt = ground(fx + Hash01(s, 9) * 2.0f, -4.2f - Hash01(s, 10) * 3.4f);
-        const Vector3 farAt = ground(fx + Hash01(s, 15) * 2.0f, -9.5f - Hash01(s, 16) * 6.0f);
-        const Vector3 homeAt = ground(farAt.x, -9.5f - Hash01(s, 16) * 2.0f);
+        const Vector3 midAt = river ? ground(fx + Hash01(s, 9) * 2.0f, -3.0f - Hash01(s, 10) * 1.0f)
+                                    : ground(fx + Hash01(s, 9) * 2.0f, -4.2f - Hash01(s, 10) * 3.4f);
+        const Vector3 farAt = ground(fx + Hash01(s, 15) * 2.0f, -10.0f - Hash01(s, 16) * 5.5f);
+        const Vector3 homeAt = ground(farAt.x, -10.0f - Hash01(s, 16) * 2.0f);
         const Vector3 frontAt = ground(fx + Hash01(s, 25) * 2.0f, 2.0f + Hash01(s, 26) * 1.6f);
+        const float waterX = fx + Hash01(s, 31) * 2.0f, waterZ = -5.5f - Hash01(s, 32) * 2.0f;
         const float size = 0.95f + Hash01(s, 11) * 0.5f, farSize = 1.3f + Hash01(s, 17) * 0.8f, small = 0.8f + Hash01(s, 5) * 0.5f;
+
+        // Along the edges of the path: little stones everywhere, tufts of grass where grass grows.
+        Vector3 grassTint, pathTint;
+        GroundColours(fx + 1.2f, grassTint, pathTint);
+        if (Hash01(s, 40) < 0.6f) DrawShape(sRock, Place(ground(fx + Hash01(s, 41) * 2.2f, -1.12f), 0.3f), Vector3Scale(pathTint, 1.05f));
+        if (Hash01(s, 42) < 0.6f) DrawShape(sRock, Place(ground(fx + Hash01(s, 43) * 2.2f, 1.12f), 0.3f), Vector3Scale(pathTint, 1.05f));
+        if (biome != BIOME_SNOW && biome != BIOME_SEASIDE) {
+            DrawShape(sTuft, Place(ground(fx + Hash01(s, 44) * 2.2f, -1.3f - Hash01(s, 45) * 0.5f), 1.0f, sway, bop), Vector3Scale(grassTint, 1.2f));
+            DrawShape(sTuft, Place(ground(fx + Hash01(s, 46) * 2.2f, 1.3f + Hash01(s, 47) * 0.5f), 1.0f, sway, bop), Vector3Scale(grassTint, 1.2f));
+        }
 
         switch (biome) {
             case BIOME_MEADOW: {
-                if (rNear < 0.24f) flowers(nearAt, 3);
-                else if (rNear < 0.38f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
-                else if (rNear < 0.46f) DrawShape(sRock, Place(nearAt, small + 0.3f));
-                else if (rNear < 0.52f) DrawShape(sMushroom, Place(nearAt, 1.0f, sway, bop));
-                else if (rNear < 0.60f) lamp(nearAt);
-                if (rMid < 0.6f) {
-                    if (Hash(s, 13) & 1) tree(midAt, size, sCrown, kLeaf[Hash(s, 12) % 5]);
-                    else tree(midAt, size, sPine, Vector3Scale(kLeaf[Hash(s, 12) % 3], 0.85f));
+                if (variant == 0) {          // flower fields, with a windmill now and then
+                    if (rNear < 0.5f) flowers(nearAt, 4, 1.2f);
+                    else if (rNear < 0.6f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
+                    else if (rNear < 0.66f) lamp(nearAt);
+                    if (rMid < 0.5f) flowers(midAt, 5, 2.2f);
+                    else if (rMid < 0.72f) tree(midAt, size, sCrown, kLeaf[Hash(s, 12) % 5]);
+                    if (rFar < 0.09f) {
+                        const Vector3 at = ground(farAt.x, -10.5f);
+                        DrawShape(sWindmill, Place(at, 1.5f));
+                        DrawShape(sBlades, MatrixMultiply(MatrixRotateZ(time * 0.8f + s), MatrixTranslate(at.x, at.y + 2.85f, at.z + 0.95f)), Vector3{ 1.5f, 1.5f, 1.5f });
+                    } else if (rFar < 0.5f) tree(farAt, farSize, (Hash(s, 18) & 1) ? sPoplar : sCrown, Vector3Scale(kLeaf[Hash(s, 19) % 3], 0.88f));
+                    if (rFront < 0.4f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
+                } else if (variant == 1) {   // farmland: fences, rows of crops, a barn
+                    fence(-1.75f);
+                    for (int row = 0; row < 3; row++)
+                        if (Hash01(s, 34 + row) < 0.8f)
+                            DrawShape(sCrop, Place(ground(fx + 1.2f, -3.1f - row * 1.25f), 1.0f, sway, bop), Vector3Multiply(kLeaf[row == 1 ? 2 : 0], night));
+                    if (rExtra < 0.1f) DrawShape(sScarecrow, Place(ground(fx + 1.2f, -6.9f), 1.2f, 0.06f * sinf(time * 2.0f + s) + sway));
+                    else if (rExtra < 0.24f) DrawShape(sHay, Place(ground(fx + 0.6f, -7.2f), 0.9f));
+                    if (rFar < 0.12f) DrawShape(sBarn, Place(homeAt, 1.2f));
+                    else if (rFar < 0.6f) tree(farAt, farSize, sPoplar, Vector3Scale(kLeaf[Hash(s, 19) % 3], 0.9f));
+                    if (rFront < 0.2f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
+                    else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f));
+                } else {                     // riverside: reeds on the bank, ducks and lilies on the water, wooden bridges
+                    if (rNear < 0.3f) flowers(nearAt, 3, 0.8f);
+                    else if (rNear < 0.42f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
+                    else if (rNear < 0.5f) lamp(nearAt);
+                    if (rMid < 0.35f) DrawShape(sReed, Place(ground(midAt.x, -4.2f), 1.2f, sway * 2.0f, bop));
+                    else if (rMid < 0.62f) tree(midAt, size * 0.9f, sCrown, kLeaf[Hash(s, 12) % 3]);
+                    if (rExtra < 0.09f) DrawShape(sBridge, Place(afloat(fx + 1.2f, -6.5f, 0.02f)), timber);
+                    else if (rExtra < 0.34f) DrawShape(sDuck, Place(afloat(waterX + 0.4f * sinf(time * 0.4f + s), waterZ, 0.02f * sinf(time * 2.0f + s))));
+                    else if (rExtra < 0.62f) DrawShape(sLily, Place(afloat(waterX, waterZ, 0.01f), 1.0f + Hash01(s, 5) * 0.6f));
+                    if (rFar < 0.12f) house(homeAt, tiles, lit);
+                    else if (rFar < 0.62f) tree(farAt, farSize, (Hash(s, 18) % 3) ? sCrown : sPoplar, Vector3Scale(kLeaf[Hash(s, 19) % 3], 0.88f));
+                    if (rFront < 0.2f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
+                    else if (rFront < 0.32f) DrawShape(sBush, Place(frontAt, 0.6f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
                 }
-                if (rFar < 0.14f) house(homeAt, tiles, lit);
-                else if (rFar < 0.62f) {
-                    const bool pine = (Hash(s, 18) % 3) != 0;
-                    tree(farAt, farSize, pine ? sPine : sCrown, Vector3Scale(kLeaf[Hash(s, 19) % (pine ? 3 : 5)], 0.88f));
-                }
-                if (rFront < 0.2f) DrawShape(sFlower, Place(frontAt, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
-                else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f));
-                else if (rFront < 0.38f) DrawShape(sBush, Place(frontAt, 0.6f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
                 break;
             }
             case BIOME_BLOSSOM: {
-                if (rNear < 0.26f) flowers(nearAt, 3);
-                else if (rNear < 0.34f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[1], night));
-                else if (rNear < 0.42f) DrawShape(sRock, Place(nearAt, small + 0.3f));
-                else if (rNear < 0.58f) {   // stone lantern
-                    DrawShape(sStoneLantern, Place(nearAt, 1.1f));
-                    DrawShape(sLanternGlow, Place(nearAt, 1.1f), white, 0.3f + 0.7f * lit);
-                    AddHalo(Vector3{ nearAt.x, nearAt.y + 0.97f, nearAt.z + 0.2f }, 0.42f, kWarm, 0.14f * lit);
+                auto stoneLantern = [&](Vector3 at) {
+                    DrawShape(sStoneLantern, Place(at, 1.1f));
+                    DrawShape(sLanternGlow, Place(at, 1.1f), white, 0.3f + 0.7f * lit);
+                    AddHalo(Vector3{ at.x, at.y + 0.97f, at.z + 0.2f }, 0.42f, kWarm, 0.14f * lit);
+                };
+                if (variant == 2) {          // lantern festival: strings of paper lanterns and stalls
+                    const float z = -1.85f, top = 2.15f, y0 = GroundHeight(fx, z) + top, y1 = GroundHeight(fx + spacing, z) + top;
+                    DrawShape(sLanternPole, Place(ground(fx, z)));
+                    for (int k = 0; k < 3; k++) {   // the string sags between this pole and the next
+                        const float u = (k + 0.5f) / 3.0f;
+                        const Vector3 at = { fx + spacing * u, y0 + (y1 - y0) * u - 0.32f * sinf(u * kPi), z };
+                        const Vector3 tint = kLantern[(s * 3 + k) & 3];
+                        DrawShape(sPaperLantern, Place(at, 1.0f, 0.12f * sinf(time * 1.8f + k + s) + sway, bop), tint, 0.45f + 0.5f * lit);
+                        AddHalo(Vector3{ at.x, at.y, at.z + 0.15f }, 0.32f, tint, 0.16f * lit);
+                    }
+                    if (rMid < 0.26f) DrawShape(sStall, Place(ground(midAt.x, -3.6f), 1.15f));
+                    else if (rMid < 0.72f) tree(midAt, size * 1.12f, sCrown, kBlossom[Hash(s, 12) % 3]);
+                } else if (variant == 1) {   // a stream with red bridges, koi and lilies
+                    if (rNear < 0.24f) flowers(nearAt, 3, 0.8f);
+                    else if (rNear < 0.4f) stoneLantern(nearAt);
+                    else if (rNear < 0.48f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                    if (rMid < 0.5f) tree(midAt, size, sCrown, kBlossom[Hash(s, 12) % 3]);
+                    else if (rMid < 0.7f) DrawShape(sReed, Place(ground(midAt.x, -4.2f), 1.1f, sway * 2.0f, bop));
+                    if (rExtra < 0.12f) DrawShape(sBridge, Place(afloat(fx + 1.2f, -6.5f, 0.02f)), redPaint);
+                    else if (rExtra < 0.5f)    // koi circling just under the surface
+                        DrawShape(sKoi, Place(afloat(waterX + 0.5f * cosf(time * 0.8f + s), waterZ + 0.3f * sinf(time * 0.8f + s), 0.02f)), (s & 1) ? white : Vector3{ 1.0f, 0.9f, 0.9f });
+                    else if (rExtra < 0.8f) DrawShape(sLily, Place(afloat(waterX, waterZ, 0.01f), 1.0f + Hash01(s, 5) * 0.6f));
+                } else {                     // the garden: stone lanterns, bamboo, gates
+                    if (rNear < 0.26f) flowers(nearAt, 3, 0.8f);
+                    else if (rNear < 0.34f) DrawShape(sBush, Place(nearAt, small, sway, bop), Vector3Multiply(kLeaf[1], night));
+                    else if (rNear < 0.42f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                    else if (rNear < 0.58f) stoneLantern(nearAt);
+                    if (rMid < 0.62f) tree(midAt, size * 1.12f, sCrown, kBlossom[Hash(s, 12) % 3]);
+                    else if (rMid < 0.84f) DrawShape(sBamboo, Place(midAt, 0.9f + Hash01(s, 11) * 0.4f, sway * 0.6f), night);
                 }
-                if (rMid < 0.62f) tree(midAt, size * 1.12f, sCrown, kBlossom[Hash(s, 12) % 3]);
-                else if (rMid < 0.84f) DrawShape(sBamboo, Place(midAt, 0.9f + Hash01(s, 11) * 0.4f, sway * 0.6f), night);
-                if (rFar < 0.10f) DrawShape(sGate, Place(ground(farAt.x, -9.0f), 1.35f));
+                if (rFar < 0.10f) DrawShape(sGate, Place(ground(farAt.x, -10.0f), 1.35f));
                 else if (rFar < 0.62f) {
                     if (Hash(s, 18) % 4) tree(farAt, farSize, sCrown, Vector3Scale(kBlossom[Hash(s, 19) % 3], 0.94f));
                     else tree(farAt, farSize, sPine, Vector3Scale(kLeaf[1], 0.85f));
@@ -2016,56 +2311,111 @@ static void DrawScenery()
                 break;
             }
             case BIOME_AUTUMN: {
-                if (rNear < 0.18f) DrawShape(sPumpkin, Place(nearAt, 0.7f + Hash01(s, 5) * 0.6f, 0.0f, bop));
-                else if (rNear < 0.32f) DrawShape(sMushroom, Place(nearAt, 1.3f, sway, bop));
-                else if (rNear < 0.42f) DrawShape(sStump, Place(nearAt, small));
-                else if (rNear < 0.52f) DrawShape(sRock, Place(nearAt, small + 0.3f));
-                else if (rNear < 0.60f) lamp(nearAt);
-                else if (rNear < 0.76f) DrawShape(sLeafPile, Place(nearAt, small + 0.2f), Vector3Multiply(kFall[Hash(s, 6) % 4], night));
-                if (rMid < 0.66f) {
-                    if (Hash(s, 13) % 5) tree(midAt, size, sCrown, kFall[Hash(s, 12) % 4]);
-                    else tree(midAt, size, sPine, Vector3Scale(kLeaf[1], 0.8f));
+                if (variant == 1) {          // pumpkin patch: rows of pumpkins behind a fence, a scarecrow keeping watch
+                    fence(-1.75f);
+                    for (int row = 0; row < 3; row++)
+                        if (Hash01(s, 34 + row) < 0.75f)
+                            DrawShape(sPumpkin, Place(ground(fx + 0.4f + Hash01(s, 37 + row) * 1.6f, -3.0f - row * 1.3f), 0.7f + Hash01(s, 5 + row) * 0.5f, 0.0f, bop));
+                    if (rExtra < 0.12f) DrawShape(sScarecrow, Place(ground(fx + 1.2f, -7.0f), 1.2f, 0.06f * sinf(time * 2.0f + s) + sway));
+                    if (rFar < 0.2f) DrawShape(sHay, Place(farAt, 1.3f));
+                    else if (rFar < 0.68f) tree(farAt, farSize, sCrown, Vector3Scale(kFall[Hash(s, 19) % 4], 0.9f));
+                } else if (variant == 2) {   // harvest village: houses with smoking chimneys, hay, lamps
+                    if (rNear < 0.16f) DrawShape(sPumpkin, Place(nearAt, 0.7f + Hash01(s, 5) * 0.5f, 0.0f, bop));
+                    else if (rNear < 0.32f) lamp(nearAt);
+                    else if (rNear < 0.46f) DrawShape(sLeafPile, Place(nearAt, small + 0.2f), Vector3Multiply(kFall[Hash(s, 6) % 4], night));
+                    else if (rNear < 0.56f) DrawShape(sBarrel, Place(nearAt, 1.0f));
+                    if (rMid < 0.26f) house(ground(midAt.x, -5.6f), Vector3{ 0.62f, 0.40f, 0.34f }, lit);
+                    else if (rMid < 0.42f) DrawShape(sHay, Place(midAt, 0.9f));
+                    else if (rMid < 0.72f) tree(midAt, size, sCrown, kFall[Hash(s, 12) % 4]);
+                    if (rFar < 0.16f) house(homeAt, tiles, lit);
+                    else if (rFar < 0.66f) tree(farAt, farSize, (Hash(s, 18) % 3) ? sCrown : sPoplar, Vector3Scale(kFall[Hash(s, 19) % 4], 0.9f));
+                } else {                     // deep woods: trees close together, mushrooms, stumps, leaf piles
+                    if (rNear < 0.26f) DrawShape(sMushroom, Place(nearAt, 1.3f, sway, bop));
+                    else if (rNear < 0.4f) DrawShape(sStump, Place(nearAt, small));
+                    else if (rNear < 0.5f) DrawShape(sRock, Place(nearAt, small + 0.3f));
+                    else if (rNear < 0.7f) DrawShape(sLeafPile, Place(nearAt, small + 0.2f), Vector3Multiply(kFall[Hash(s, 6) % 4], night));
+                    if (rMid < 0.85f) {
+                        if (Hash(s, 13) % 5) tree(midAt, size, sCrown, kFall[Hash(s, 12) % 4]);
+                        else tree(midAt, size, sPine, Vector3Scale(kLeaf[1], 0.8f));
+                    }
+                    if (rExtra < 0.6f) tree(ground(fx + Hash01(s, 38) * 2.0f, -6.6f - Hash01(s, 39) * 2.0f), size * 1.15f, sCrown, Vector3Scale(kFall[Hash(s, 36) % 4], 0.95f));
+                    if (rFar < 0.8f) tree(farAt, farSize, sCrown, Vector3Scale(kFall[Hash(s, 19) % 4], 0.9f));
                 }
-                if (rFar < 0.12f) house(homeAt, Vector3{ 0.62f, 0.40f, 0.34f }, lit);
-                else if (rFar < 0.20f) DrawShape(sHay, Place(farAt, 1.3f));
-                else if (rFar < 0.68f) tree(farAt, farSize, sCrown, Vector3Scale(kFall[Hash(s, 19) % 4], 0.9f));
                 if (rFront < 0.16f) DrawShape(sPumpkin, Place(frontAt, 0.6f, 0.0f, bop));
                 else if (rFront < 0.28f) DrawShape(sLeafPile, Place(frontAt, 0.7f), Vector3Multiply(kFall[Hash(s, 28) % 4], night));
                 else if (rFront < 0.36f) DrawShape(sRock, Place(frontAt, 0.7f));
                 break;
             }
             case BIOME_SNOW: {
+                auto snowyPine = [&](Vector3 at, float scale, float shade) {
+                    tree(at, scale, sPine, Vector3Scale(pineGreen, shade));
+                    DrawShape(sSnowCap, Place(at, scale, sway, bop), Vector3Multiply(snowTint, night));
+                };
                 if (rNear < 0.14f) DrawShape(sSnowman, Place(nearAt, 1.0f, sway, bop));
-                else if (rNear < 0.30f) DrawShape(sRock, Place(nearAt, small + 0.3f), Vector3{ 0.9f, 0.94f, 1.0f });
-                else if (rNear < 0.42f) lamp(nearAt);
-                else if (rNear < 0.54f) DrawShape(sBush, Place(nearAt, small), Vector3Multiply(snowTint, night));   // a snowdrift
-                if (rMid < 0.62f) {
-                    tree(midAt, size, sPine, pineGreen);
-                    DrawShape(sSnowCap, Place(midAt, size, sway, bop), Vector3Multiply(snowTint, night));
-                }
-                if (rFar < 0.20f) house(homeAt, snowTint, std::max(lit, 0.55f));   // cabins keep a light on
-                else if (rFar < 0.66f) {
-                    tree(farAt, farSize, sPine, Vector3Scale(pineGreen, 0.9f));
-                    DrawShape(sSnowCap, Place(farAt, farSize, sway, bop), Vector3Multiply(snowTint, night));
+                else if (rNear < 0.28f) DrawShape(sRock, Place(nearAt, small + 0.3f), Vector3{ 0.9f, 0.94f, 1.0f });
+                else if (rNear < 0.40f) lamp(nearAt);
+                else if (rNear < 0.52f) DrawShape(sBush, Place(nearAt, small), Vector3Multiply(snowTint, night));   // a snowdrift
+                if (variant == 1) {          // frozen river: skating marks on the ice, igloos on the far bank
+                    if (rMid < 0.5f) snowyPine(midAt, size * 0.9f, 1.0f);
+                    if (rExtra < 0.4f) DrawShape(sRing, Place(afloat(waterX, waterZ, 0.02f), 0.5f + Hash01(s, 5) * 0.5f), Vector3Multiply(white, night));
+                    if (rFar < 0.14f) DrawShape(sIgloo, Place(ground(farAt.x, -10.4f), 1.1f), Vector3Multiply(snowTint, night));
+                    else if (rFar < 0.66f) snowyPine(farAt, farSize, 0.9f);
+                } else if (variant == 2) {   // pine forest: trees close together, the odd lonely cabin
+                    if (rMid < 0.88f) snowyPine(midAt, size, 1.0f);
+                    if (rExtra < 0.7f) snowyPine(ground(fx + Hash01(s, 38) * 2.0f, -6.8f - Hash01(s, 39) * 2.0f), size * 1.2f, 0.95f);
+                    if (rFar < 0.06f) house(homeAt, snowTint, std::max(lit, 0.55f));
+                    else if (rFar < 0.85f) snowyPine(farAt, farSize, 0.9f);
+                } else {                     // the village: cabins that keep a light on
+                    if (rMid < 0.62f) snowyPine(midAt, size, 1.0f);
+                    if (rFar < 0.20f) house(homeAt, snowTint, std::max(lit, 0.55f));
+                    else if (rFar < 0.66f) snowyPine(farAt, farSize, 0.9f);
                 }
                 if (rFront < 0.2f) DrawShape(sBush, Place(frontAt, 0.6f), Vector3Multiply(snowTint, night));
                 else if (rFront < 0.3f) DrawShape(sRock, Place(frontAt, 0.7f), Vector3{ 0.9f, 0.94f, 1.0f });
                 break;
             }
             case BIOME_SEASIDE: {
-                if (rNear < 0.16f) DrawShape(sUmbrella, Place(nearAt, 1.1f, sway * 0.5f));
-                else if (rNear < 0.28f) DrawShape(sCastle, Place(nearAt, 1.0f));
-                else if (rNear < 0.46f) DrawShape(sShell, Place(nearAt, 1.0f + Hash01(s, 5)), kShellTint[Hash(s, 6) % 3]);
-                else if (rNear < 0.56f) DrawShape(sRock, Place(nearAt, small + 0.2f));
-                else if (rNear < 0.62f) lamp(nearAt);
-                if (rMid < 0.4f) {   // palms stay on the sand, above the waterline
+                auto palm = [&](float chance) {   // palms stay on the sand, above the waterline
+                    if (rMid >= chance) return;
                     const Vector3 at = ground(midAt.x, -4.4f - Hash01(s, 10) * 1.8f);
                     DrawShape(sPalmTrunk, Place(at, size * 0.9f, sway * 0.7f));
                     DrawShape(sPalmLeaves, Place(at, size * 0.9f, sway * 0.7f, bop), Vector3Multiply(kLeaf[Hash(s, 12) % 3], night));
-                }
-                if (rFar < 0.22f) {   // a boat bobbing on the sea
+                };
+                auto boat = [&](float chance) {
+                    if (rFar >= chance) return;
                     const Vector3 at = { farAt.x + 0.8f * sinf(time * 0.3f + s), kSeaLevel + 0.05f * sinf(time * 1.7f + s), -11.0f - Hash01(s, 16) * 6.0f };
                     DrawShape(sBoat, Place(at, 1.5f, 0.06f * sinf(time * 1.3f + s)));
+                };
+                if (variant == 1) {          // harbour: a pier, crates and barrels, now and then a lighthouse
+                    if (rNear < 0.16f) DrawShape(sCrate, Place(nearAt, 1.0f + Hash01(s, 5) * 0.4f));
+                    else if (rNear < 0.30f) DrawShape(sBarrel, Place(nearAt, 1.0f));
+                    else if (rNear < 0.44f) lamp(nearAt);
+                    else if (rNear < 0.54f) DrawShape(sRock, Place(nearAt, small + 0.2f));
+                    if (rExtra < 0.12f) DrawShape(sPier, Place(Vector3{ fx + 1.2f, kSeaLevel + 0.1f, -6.4f }));
+                    else if (rExtra < 0.19f) {
+                        const Vector3 at = ground(fx + 1.2f, -6.2f);
+                        const float beam = 0.5f + 0.5f * sinf(time * 2.2f + s);   // the lamp turns
+                        DrawShape(sLighthouse, Place(at, 1.25f));
+                        DrawShape(sLighthouseLamp, Place(at, 1.25f), white, 0.3f + 0.7f * lit * beam);
+                        AddHalo(Vector3{ at.x, at.y + 4.7f, at.z + 0.4f }, 0.9f + 0.5f * beam, kWarm, 0.22f * lit * beam);
+                    }
+                    palm(0.15f);
+                    boat(0.36f);
+                } else if (variant == 2) {   // rocky cove: stacks of rock in the water, crabs on the sand
+                    if (rNear < 0.3f) DrawShape(sRock, Place(nearAt, small + 0.5f));
+                    else if (rNear < 0.5f) DrawShape(sCrab, Place(ground(nearAt.x + 0.35f * sinf(time * 2.4f + s), nearAt.z), 1.0f, 0.0f, bop));
+                    else if (rNear < 0.62f) DrawShape(sShell, Place(nearAt, 1.0f + Hash01(s, 5)), kShellTint[Hash(s, 6) % 3]);
+                    if (rExtra < 0.4f) DrawShape(sSeaStack, Place(Vector3{ fx + Hash01(s, 38) * 2.0f, kSeaLevel - 0.15f, -10.0f - Hash01(s, 39) * 6.0f }, 1.0f + Hash01(s, 5) * 0.9f));
+                    palm(0.25f);
+                    boat(0.1f);
+                } else {                     // the beach: umbrellas, sandcastles, starfish
+                    if (rNear < 0.16f) DrawShape(sUmbrella, Place(nearAt, 1.1f, sway * 0.5f));
+                    else if (rNear < 0.28f) DrawShape(sCastle, Place(nearAt, 1.0f));
+                    else if (rNear < 0.46f) DrawShape(sShell, Place(nearAt, 1.0f + Hash01(s, 5)), kShellTint[Hash(s, 6) % 3]);
+                    else if (rNear < 0.56f) DrawShape(sRock, Place(nearAt, small + 0.2f));
+                    else if (rNear < 0.62f) lamp(nearAt);
+                    palm(0.4f);
+                    boat(0.22f);
                 }
                 if (rFront < 0.24f) DrawShape(sShell, Place(frontAt, 1.2f), kShellTint[Hash(s, 27) % 3]);
                 else if (rFront < 0.34f) DrawShape(sRock, Place(frontAt, 0.7f));
@@ -2657,7 +3007,7 @@ static void DrawMenu()
             CatDo(ACT_HOP);
         }
     }
-    Text(TextFormat("now passing: %s", kBiomeName[BiomeNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
+    Text(TextFormat("now passing: %s, %s", kBiomeName[BiomeNear(gScene.worldX)], kVariantName[BiomeNear(gScene.worldX)][VariantNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
     Text("Esc pauses  -  F11 fullscreen", leftCx, gVH - 16, 10, kSoft);
 
     Card(shelfX, shelfY, shelfW, shelfH, kPaper, kLine);
@@ -3001,7 +3351,7 @@ int main(int argc, char** argv)
     // --selftest                      analysis and sound check, no window
     // --sfx-demo <wav>                writes a short audition of the sound effects
     // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2] [--scenery 0..5]
-    //              [--cat 0..6] [--closeup]
+    //              [--variant 0..2] [--cat 0..6] [--closeup]
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
     std::string songPath;
@@ -3017,6 +3367,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--diff") && i + 1 < argc) shotDiff = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scenery") && i + 1 < argc) shotScenery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cat") && i + 1 < argc) shotCat = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--variant") && i + 1 < argc) gForceVariant = std::clamp(atoi(argv[++i]), 0, 2);
         else if (!strcmp(argv[i], "--closeup")) gCloseup = true;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &winW, &winH);
         else if (argv[i][0] != '-') songPath = argv[i];

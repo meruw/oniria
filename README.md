@@ -49,9 +49,23 @@ Every hit moves the camera in its own way: it bounces with a hop, lunges with a 
 
 ### Places
 
-The walk passes through five places, each with its own ground, plants, props and weather: a **meadow**, a **blossom garden** with stone lanterns and bamboo, **autumn woods** with pumpkins and falling leaves, a **snowy village** with cabins and snowmen, and the **seaside** with palms, sandcastles and boats.
+The walk passes through five places, each with its own ground, plants, props, weather and horizon, and each in three variations:
 
-By default a song is a journey: it starts in a place picked by the song's name and moves on roughly every half minute, blending from one to the next. The song screen lets you stay in a single place instead.
+| Place | Variations | On the horizon |
+| --- | --- | --- |
+| Meadow | flower fields with a windmill, farmland with fences, crops and a barn, a riverside with ducks and wooden bridges | hot-air balloons |
+| Blossom garden | a garden of stone lanterns and bamboo, a stream with red bridges and koi, a lantern festival with stalls | a great snow-capped mountain |
+| Autumn woods | deep woods, a pumpkin patch watched by a scarecrow, a harvest village with smoking chimneys | birds flying south |
+| Snowy village | a village of cabins and snowmen, a frozen river with igloos, a pine forest under the aurora | a range of white peaks |
+| Seaside | a beach with umbrellas and sandcastles, a harbour with a pier and a lighthouse, a rocky cove with crabs | low islands |
+
+By default a song is a journey: it starts in a place picked by the song's name and moves on roughly every half minute, blending from one to the next, so a place you come back to shows a different side. The song screen lets you stay in a single place instead, and then its three variations take turns.
+
+| Lantern festival | Harbour |
+| --- | --- |
+| ![Lantern festival](docs/img/lantern-festival.png) | ![Harbour](docs/img/harbour.png) |
+| **Pumpkin patch** | **Riverside** |
+| ![Pumpkin patch](docs/img/pumpkin-patch.png) | ![Riverside](docs/img/riverside.png) |
 
 ### Your songs
 

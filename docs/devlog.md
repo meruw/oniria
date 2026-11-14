@@ -2,6 +2,17 @@
 
 Newest entries first.
 
+## 2026-11-13: fifteen places instead of five
+
+The five places each looked the same every time. Now each has three variations with their own landmarks: flower fields with a windmill, farmland, a riverside; a garden, a stream with red bridges, a lantern festival; deep woods, a pumpkin patch, a harvest village; a village, a frozen river, a pine forest under the aurora; a beach, a harbour with a lighthouse, a rocky cove.
+
+- A stop on the journey is now a place and a variation. The variation counts up from a seed, so coming back to a place shows another side of it.
+- Rivers are a terrain feature, not a prop: two rows behind the path are pressed flat and drawn as water or ice, which costs nothing extra to draw.
+- Each place got a flat backdrop behind the hills (balloons, a mountain, birds, peaks and aurora, islands), small stones along the path everywhere, tufts of grass where grass grows, and smoke from every chimney.
+- The snow path was almost the same colour as the snow around it, which made the path hard to see at night. It is darker and bluer now.
+
+Cost: a frame went from about 1.1 ms to about 1.3 ms of CPU in the simulated run. Crops and tufts were first built from the faceted ball used for bushes, which would have added thousands of triangles per frame; they are three-sided cones instead.
+
 ## 2026-11-13: seven cats, a better cat, and a measured diet
 
 **"It must be very lightweight, remember."** A fair reminder, and measuring instead of assuming paid off at once: with the menu open the game was using 123% of a CPU core. V-sync was requested but not being applied, so the loop was drawing thousands of frames a second. Nothing in the screenshot-based checks could have shown that.

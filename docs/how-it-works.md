@@ -78,6 +78,12 @@ A place (biome) is a small set of choices: ground and path colour, a sky tint, w
 
 `BiomeAt(x)` answers "where are we at world position x" as a blend between two places. During a song the path is divided into equal stretches, one per roughly thirty seconds of music up to five; the first place comes from a hash of the song's name and each next one is two steps further round the list, which visits all five and never puts similar places side by side. The last nine units of a stretch blend into the next: ground colours interpolate, props switch at the midpoint. In the menus the same function runs on the idle walk, so the background strolls through every place.
 
+Every place has three variations. A stop on the journey is a place plus a variation; the variation simply counts up from a seed taken from the song's name, so returning to a place shows a different one, and a song fixed to one place cycles through all three. A variation changes the prop mix of each depth band and brings its own landmarks: a windmill whose blades turn, fences that follow the slope, a string of paper lanterns that sags from pole to pole, a pier, a lighthouse whose lamp turns after dark.
+
+Three variations (riverside, stream, frozen river) add a river: the terrain is pressed flat between two rows behind the path, those cells are drawn as water or ice, and the middle band of props moves up onto the near bank. Things on the water (ducks, lilies, koi, bridges) are placed at the river's level instead of on the ground.
+
+Each place also has a flat backdrop drawn behind the hills: balloons, a mountain, a flight of birds, a range of peaks with an aurora at night, islands.
+
 The time of day is applied on top as a shading factor, so every place goes from afternoon to night without needing its own palette keys. Only part of the palette's colour cast is used for that factor, otherwise pale ground such as snow turns violet at night.
 
 The seaside is the one place that changes the terrain: behind the path the ground runs down to a fixed sea level, and the rows beyond the shoreline are drawn as water with bands of lighter colour drifting across.
@@ -133,4 +139,4 @@ Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--cat 0..6] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
