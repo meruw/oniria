@@ -4,7 +4,7 @@ A cozy, low-poly rhythm game. Give it a song and a cat takes a walk along a path
 
 Native C++ with [raylib](https://www.raylib.com/). Open source under the MIT license.
 
-![The cat mid-walk at sunset](docs/img/sunset.png)
+![A long streak at sunset](docs/img/sunset.png)
 
 | Afternoon | Night |
 | --- | --- |
@@ -24,6 +24,20 @@ The cat walks by itself. Things appear on the path in time with the music, and e
 | `K` | Ring | Bellflowers arching over the path |
 
 A soft spot of light just ahead of the cat marks where each thing should be answered. The arrow keys work too (left, down, up, right). `Esc` pauses, `F11` toggles fullscreen.
+
+### Streaks
+
+Every hit in a row makes the walk happier, and a miss calms it back down:
+
+- A **perfect** hit always gets a twinkle, a burst of stars, a ring of light on the path and two new flowers.
+- As the streak grows the cat prances, blushes and gives off hearts, flowers spring up ahead of it, the trees dance harder, lamps come on, soft lights and petals drift through the sky, and eventually a rainbow comes out.
+- The five hearts under the score show the current mood. Streaks of 10, 25, 50 and 100 get a banner and a little fanfare.
+
+### Sound
+
+Each action has its own soft instrument (marimba for logs, a round "bloop" for yarn, kalimba for butterflies, a small bell for bells), and the note climbs a pentatonic scale as the streak grows, so a good run plays a tune over the song. Everything is synthesized at startup; there are no audio files. The volume is on the song screen, and `oniria.exe --sfx-demo out.wav` writes a short audition.
+
+### Difficulty
 
 There are three difficulties. **Cozy** only uses hop and bat, **Playful** adds butterflies, and **Zoomies** uses all four and sometimes asks for two at once.
 
@@ -70,13 +84,14 @@ The long version is in [docs/how-it-works.md](docs/how-it-works.md), and the sto
 - Every screen has been rendered offscreen with a simulated clock and inspected (`oniria.exe --shot out.png --view play --at 20`).
 - The real game starts, opens the audio device and runs.
 
-Not yet verified by a person playing: how the timing feels with real key presses and real audio output, the default latency value, and how well the charts fit music other than the demo track.
+Not yet verified by a person playing: how the timing feels with real key presses and real audio output, the default latency value, how the sound effects actually sound (they have only been checked for level and length), and how well the charts fit music other than the demo track.
 
 ## Project layout
 
 ```
 src/main.cpp          game loop, renderer, UI
 src/analysis.cpp      onset detection, chart generation, demo track
+src/sfx.cpp           synthesized sound effects
 src/platform_win.cpp  file dialog, raw keyboard input
 scripts/              dependency download
 docs/                 design notes and devlog

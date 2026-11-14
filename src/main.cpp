@@ -8,6 +8,7 @@
 
 #include "analysis.h"
 #include "platform.h"
+#include "sfx.h"
 
 #include <algorithm>
 #include <atomic>
@@ -68,6 +69,7 @@ struct Settings {
     int   offsetMs = 0;       // positive = objects arrive later
     bool  watch    = false;   // the cat plays by itself
     bool  hints    = true;    // show the key above each object
+    int   sfx      = 7;       // sound effects volume, 0..10
 };
 static Settings gCfg;
 
@@ -85,6 +87,7 @@ static void LoadSettings()
         else if (!strcmp(key, "offset")) gCfg.offsetMs = std::clamp((int)v, -300, 300);
         else if (!strcmp(key, "watch")) gCfg.watch = v != 0.0f;
         else if (!strcmp(key, "hints")) gCfg.hints = v != 0.0f;
+        else if (!strcmp(key, "sfx")) gCfg.sfx = std::clamp((int)v, 0, 10);
     }
     fclose(f);
 }
@@ -93,8 +96,8 @@ static void SaveSettings()
 {
     FILE* f = fopen(ConfigPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\n",
-            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0);
+    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\n",
+            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx);
     fclose(f);
 }
 
@@ -107,7 +110,7 @@ static void SaveSettings()
 
 struct Player {
     std::vector<int16_t> pcm;   // stereo interleaved
-    int      sampleRate = 44100;
+    std::atomic<int> sampleRate{ 48000 };
     int64_t  frames = 0;
     std::mutex mutex;           // guards pcm/frames/pos against song swaps and seeks
     std::atomic<int64_t>  pos{ 0 };
@@ -128,29 +131,74 @@ static void StampLocked(int64_t pos)
     gPlayer.seq.fetch_add(1);
 }
 
+// Sound effects are mixed into the same callback as the song, so they get
+// the same low latency. The game thread queues commands; the voices belong to
+// the audio thread.
+struct SfxCommand { int sound; float rate, gain; };
+struct SfxVoice { const float* data = nullptr; int length = 0; double pos = 0.0, step = 1.0; float gain = 0.0f; };
+static std::vector<float> gSfxData[SFX_COUNT];
+static SfxCommand gSfxQueue[64];
+static std::atomic<unsigned> gSfxWrite{ 0 }, gSfxRead{ 0 };
+static SfxVoice gSfxVoices[16];
+
+static void MixSfx(float* out, unsigned int frames)
+{
+    unsigned r = gSfxRead.load(std::memory_order_relaxed);
+    const unsigned w = gSfxWrite.load(std::memory_order_acquire);
+    for (; r != w; r++) {
+        const SfxCommand c = gSfxQueue[r & 63];
+        SfxVoice* v = &gSfxVoices[0];
+        for (SfxVoice& cand : gSfxVoices) {
+            if (!cand.data) { v = &cand; break; }
+            if (cand.pos > v->pos) v = &cand;   // all busy: reuse the one that is furthest along
+        }
+        v->data = gSfxData[c.sound].data();
+        v->length = (int)gSfxData[c.sound].size();
+        v->pos = 0.0;
+        v->step = (double)c.rate * kSfxRate / gPlayer.sampleRate;
+        v->gain = c.gain;
+    }
+    gSfxRead.store(r, std::memory_order_release);
+
+    for (SfxVoice& v : gSfxVoices) {
+        if (!v.data) continue;
+        for (unsigned int i = 0; i < frames; i++) {
+            const int k = (int)v.pos;
+            if (k + 1 >= v.length) { v.data = nullptr; break; }
+            const float frac = (float)(v.pos - k);
+            const float sample = (v.data[k] + (v.data[k + 1] - v.data[k]) * frac) * v.gain;
+            out[2 * i] += sample;
+            out[2 * i + 1] += sample;
+            v.pos += v.step;
+        }
+    }
+}
+
 static void FeedAudio(void* buffer, unsigned int frames)
 {
     float* out = (float*)buffer;
-    if (!gPlayer.playing.load(std::memory_order_relaxed) || !gPlayer.mutex.try_lock()) {
-        memset(out, 0, (size_t)frames * 2 * sizeof(float));
-        return;
-    }
-    const int64_t pos = gPlayer.pos.load(std::memory_order_relaxed);
-    StampLocked(pos);
-    const int16_t* data = gPlayer.pcm.data();
-    const int64_t total = gPlayer.frames;
-    const float k = 1.0f / 32768.0f;
-    for (unsigned int i = 0; i < frames; i++) {
-        const int64_t f = pos + i;
-        if (f >= 0 && f < total) {
-            out[2 * i]     = data[2 * f] * k;
-            out[2 * i + 1] = data[2 * f + 1] * k;
-        } else {
-            out[2 * i] = out[2 * i + 1] = 0.0f;
+    if (gPlayer.playing.load(std::memory_order_relaxed) && gPlayer.mutex.try_lock()) {
+        const int64_t pos = gPlayer.pos.load(std::memory_order_relaxed);
+        StampLocked(pos);
+        const int16_t* data = gPlayer.pcm.data();
+        const int64_t total = gPlayer.frames;
+        const float k = 0.9f / 32768.0f;   // a little headroom for the effects on top
+        for (unsigned int i = 0; i < frames; i++) {
+            const int64_t f = pos + i;
+            if (f >= 0 && f < total) {
+                out[2 * i]     = data[2 * f] * k;
+                out[2 * i + 1] = data[2 * f + 1] * k;
+            } else {
+                out[2 * i] = out[2 * i + 1] = 0.0f;
+            }
         }
+        gPlayer.pos.store(pos + frames, std::memory_order_relaxed);
+        gPlayer.mutex.unlock();
+    } else {
+        memset(out, 0, (size_t)frames * 2 * sizeof(float));
     }
-    gPlayer.pos.store(pos + frames, std::memory_order_relaxed);
-    gPlayer.mutex.unlock();
+    MixSfx(out, frames);
+    for (unsigned int i = 0; i < frames * 2; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
 }
 
 // Where the audio thread is in the song right now, in seconds.
@@ -181,6 +229,17 @@ static double gSimTime = 0.0;
 // the Esc that pauses the game is not also read as "resume" by the pause menu.
 static bool Key(int key) { return gState == gFrameState && IsKeyPressed(key); }
 
+// Queues a sound effect. `semitones` shifts its pitch; `gain` is relative to the sound's own level.
+static void PlaySfx(int sound, float semitones = 0.0f, float gain = 1.0f)
+{
+    static const float kLevel[SFX_COUNT] = { 0.9f, 0.8f, 0.7f, 0.65f, 0.4f, 0.4f, 0.6f, 0.35f };
+    if (gSim || gCfg.sfx <= 0 || gSfxData[sound].empty()) return;
+    const unsigned w = gSfxWrite.load(std::memory_order_relaxed);
+    if (w - gSfxRead.load(std::memory_order_acquire) >= 64) return;
+    gSfxQueue[w & 63] = SfxCommand{ sound, powf(2.0f, semitones / 12.0f), gain * kLevel[sound] * 0.6f * (gCfg.sfx / 10.0f) };
+    gSfxWrite.store(w + 1, std::memory_order_release);
+}
+
 static SongAnalysis gSong;
 static std::string  gSongName;
 static std::string  gError;
@@ -210,6 +269,17 @@ static float gCatActionAge = 9.0f;
 
 static void CatDo(int action) { gCatAction = action; gCatActionAge = 0.0f; }
 
+// Happiness. Every hit adds to the streak and a miss empties it; `gJoy` eases
+// towards a 0..1 value derived from it and drives everything festive: the
+// cat's mood, flowers, lights, how much the world dances.
+static float gStreak = 0.0f;
+static float gJoy = 0.0f;
+static float gJoyKick = 0.0f;        // jumps to 1 on every perfect hit, then decays
+static float gEndJoy = 0.0f;         // mood on the results screen
+static int   gMilestone = 0;
+static float gMilestoneAge = 9.0f;
+static float gHeartTimer = 0.0f, gStarTimer = 0.0f, gBloomMark = 0.0f;
+
 // Loading runs on a worker thread so the world keeps moving.
 struct LoadJob {
     std::thread thread;
@@ -231,13 +301,28 @@ struct Scene {
     float worldX = 0;        // where the cat is this frame
     float camY = 0.5f;
     float time = 0;          // seconds of animation time
+    float wag = 0;           // tail phase; runs faster when the cat is happy
     float glow[ACT_COUNT] = {};
 };
 static Scene gScene;
 
-struct Spark { Vector3 pos, vel, col; float life; };
-static Spark gSparks[128];
+enum SparkKind { SPARK_SHARD, SPARK_STAR, SPARK_HEART };
+struct Spark { Vector3 pos, vel, col; float life, span, size, gravity; int kind; };
+const int kSparkCount = 192;
+static Spark gSparks[kSparkCount];
 static int   gNextSpark = 0;
+
+// Rings of light that spread on the path where a perfect hit landed.
+struct Ring { Vector3 pos; float age; };
+const int kRingCount = 8;
+static Ring gRings[kRingCount];
+static int  gNextRing = 0;
+
+// Flowers that bloom because of how you are playing.
+struct Bloom { float x, z, born; int tint; float size; };
+const int kBloomCount = 160;
+static Bloom gBlooms[kBloomCount];
+static int   gNextBloom = 0;
 static uint32_t gFxSeed = 0x1234567u;
 
 static float Rand01()
@@ -385,7 +470,7 @@ struct Palette {
 
 struct Lighting {
     Vector3 camera, lightDir, sun, ambient, fog;
-    float fogStart = 16.0f, fogEnd = 40.0f;
+    float fogStart = 16.0f, fogEnd = 40.0f, saturation = 1.0f;
 };
 static Lighting gLight;
 static Palette  gPalette;
@@ -400,6 +485,8 @@ static void EmitTri(Vector3 a, Vector3 b, Vector3 c, Vector3 col, float glow = 0
     float g = col.y * (gLight.ambient.y * sky + gLight.sun.y * ndl * 0.72f);
     float bl = col.z * (gLight.ambient.z * sky + gLight.sun.z * ndl * 0.72f);
     r += (col.x - r) * glow; g += (col.y - g) * glow; bl += (col.z - bl) * glow;
+    const float lum = 0.3f * r + 0.59f * g + 0.11f * bl;
+    r = lum + (r - lum) * gLight.saturation; g = lum + (g - lum) * gLight.saturation; bl = lum + (bl - lum) * gLight.saturation;
 
     const float dx = (a.x + b.x + c.x) / 3.0f - gLight.camera.x, dy = (a.y + b.y + c.y) / 3.0f - gLight.camera.y,
                 dz = (a.z + b.z + c.z) / 3.0f - gLight.camera.z;
@@ -453,7 +540,7 @@ static void UpdateCanvas()
 static Shape sCatBody, sCatHead, sCatEyes, sCatLeg, sCatTail, sCatTailTip;
 static Shape sLog, sYarn, sWing, sButterflyBody, sBellStalk, sBell;
 static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sWindows, sLampPost, sLamp;
-static Shape sSpark, sShadow, sHalo;
+static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sCatBlush;
 
 static const Vector3 kActionColor[ACT_COUNT] = { { 0.93f, 0.62f, 0.33f }, { 0.95f, 0.45f, 0.56f }, { 0.45f, 0.78f, 0.95f }, { 0.98f, 0.84f, 0.36f } };
 
@@ -492,8 +579,8 @@ static void BuildShapes()
     AddBox(sYarn, { 0, 0.02f, 0 }, { 0.262f, 0.03f, 0.1f }, Rgb(255, 170, 185));
     AddBox(sYarn, { -0.3f, -0.22f, 0.1f }, { 0.16f, 0.015f, 0.02f }, Rgb(255, 170, 185));
 
-    sWing.push_back({ { 0, 0, 0 }, { 0.34f, 0.28f, 0 }, { 0.30f, -0.02f, 0 }, Rgb(115, 200, 242) });   // right wing, facing the camera
-    sWing.push_back({ { 0, 0, 0 }, { 0.30f, -0.02f, 0 }, { 0.20f, -0.22f, 0 }, Rgb(170, 225, 250) });
+    sWing.push_back({ { 0, 0, 0 }, { 0.34f, 0.28f, 0 }, { 0.30f, -0.02f, 0 }, Rgb(172, 227, 247) });   // right wing, facing the camera; tinted when drawn
+    sWing.push_back({ { 0, 0, 0 }, { 0.30f, -0.02f, 0 }, { 0.20f, -0.22f, 0 }, Rgb(255, 255, 255) });
     AddBox(sButterflyBody, { 0, 0.02f, 0 }, { 0.025f, 0.13f, 0.025f }, ink);
 
     {   // The stalk grows beside the path and bends over it.
@@ -534,6 +621,28 @@ static void BuildShapes()
         sShadow.push_back({ { 0, 0, 0 }, { cosf(a1), 0, sinf(a1) * 0.6f }, { cosf(a0), 0, sinf(a0) * 0.6f }, Rgb(255, 255, 255) });
         sHalo.push_back({ { 0, 0, 0 }, { cosf(a0), sinf(a0), 0 }, { cosf(a1), sinf(a1), 0 }, Rgb(255, 255, 255) });
     }
+
+    // Celebration: a five-point star and a heart facing the camera, a flat ring for the ground.
+    for (int i = 0; i < 10; i++) {
+        const float a0 = kPi / 2 + i * kPi / 5, a1 = kPi / 2 + (i + 1) * kPi / 5;
+        const float r0 = (i & 1) ? 0.45f : 1.0f, r1 = (i & 1) ? 1.0f : 0.45f;
+        sStar.push_back({ { 0, 0, 0 }, { cosf(a0) * r0, sinf(a0) * r0, 0 }, { cosf(a1) * r1, sinf(a1) * r1, 0 }, Rgb(255, 255, 255) });
+    }
+    auto heartPoint = [](float t) {
+        const float x = 16.0f * powf(sinf(t), 3.0f), y = 13.0f * cosf(t) - 5.0f * cosf(2 * t) - 2.0f * cosf(3 * t) - cosf(4 * t);
+        return Vector3{ x / 17.0f, y / 17.0f, 0.0f };
+    };
+    for (int i = 0; i < 18; i++)
+        sHeart.push_back({ { 0, 0, 0 }, heartPoint(2 * kPi * i / 18), heartPoint(2 * kPi * (i + 1) / 18), Rgb(255, 255, 255) });
+    for (int i = 0; i < 14; i++) {
+        const float a0 = 2 * kPi * i / 14, a1 = 2 * kPi * (i + 1) / 14;
+        const Vector3 o0 = { cosf(a0), 0, sinf(a0) * 0.6f }, o1 = { cosf(a1), 0, sinf(a1) * 0.6f };
+        const Vector3 i0 = Vector3Scale(o0, 0.8f), i1 = Vector3Scale(o1, 0.8f);
+        sRing.push_back({ o0, o1, i1, Rgb(255, 255, 255) });
+        sRing.push_back({ o0, i1, i0, Rgb(255, 255, 255) });
+    }
+    for (int side = -1; side <= 1; side += 2)
+        AddBox(sCatBlush, { 0.27f, -0.07f, side * 0.24f }, { 0.035f, 0.04f, 0.05f }, Rgb(255, 150, 165));
 }
 
 // ---------------------------------------------------------------------------
@@ -723,7 +832,7 @@ static void FinishLoad()
         }
         gPlayer.sampleRate = gJob.sampleRate;
         if (!gPlayer.hasStream) {
-            gPlayer.stream = LoadAudioStream((unsigned)gPlayer.sampleRate, 32, 2);
+            gPlayer.stream = LoadAudioStream((unsigned)gPlayer.sampleRate.load(), 32, 2);
             SetAudioStreamCallback(gPlayer.stream, FeedAudio);
             PlayAudioStream(gPlayer.stream);
             gPlayer.hasStream = true;
@@ -753,6 +862,11 @@ static void StartGame()
     memset(gCount, 0, sizeof(gCount));
     memset(gHeld, 0, sizeof(gHeld));
     for (Spark& s : gSparks) s.life = 0.0f;
+    for (Ring& r : gRings) r.age = 9.0f;
+    for (Bloom& b : gBlooms) b.x = -1e9f;
+    gStreak = gJoy = gJoyKick = 0.0f;
+    gMilestoneAge = 9.0f;
+    gBloomMark = (float)(-kLeadIn) * kScrollBase * gCfg.speed;
     gJudgeKind = -1;
     gCatAction = -1;
     gScroll = kScrollBase * gCfg.speed;
@@ -771,34 +885,82 @@ static Vector3 NotePosition(int i)
     return Vector3{ x, PathHeight(x) + kHeight[action], 0.0f };
 }
 
+static void AddSpark(Vector3 pos, Vector3 vel, Vector3 col, float life, int kind, float size, float gravity)
+{
+    gSparks[gNextSpark++ % kSparkCount] = Spark{ pos, vel, col, life, life, size, gravity, kind };
+}
+
+static void AddBloom(float x, float z)
+{
+    // Flowers in front of the path stay small so they never cover what is on it.
+    const float size = z > 0.0f ? 0.55f + Rand01() * 0.3f : 1.1f + Rand01() * 0.9f;
+    gBlooms[gNextBloom++ % kBloomCount] = Bloom{ x, z, gScene.time, (int)(Rand01() * 4.0f) & 3, size };
+}
+
 static void Burst(Vector3 at, Vector3 col, int count)
 {
     for (int i = 0; i < count; i++) {
-        Spark& s = gSparks[gNextSpark++ & 127];
         const float a = Rand01() * 2 * kPi, speed = 1.2f + Rand01() * 2.2f;
-        s.pos = at;
-        s.vel = Vector3{ cosf(a) * speed + 1.5f, fabsf(sinf(a)) * speed + 1.0f, (Rand01() - 0.5f) * 1.5f };
-        s.col = Mix(col, Vector3{ 1, 1, 1 }, Rand01() * 0.5f);
-        s.life = 0.35f + Rand01() * 0.35f;
+        AddSpark(at, Vector3{ cosf(a) * speed + 1.5f, fabsf(sinf(a)) * speed + 1.0f, (Rand01() - 0.5f) * 1.5f },
+                 Mix(col, Vector3{ 1, 1, 1 }, Rand01() * 0.5f), 0.35f + Rand01() * 0.35f, SPARK_SHARD, 0.1f, 7.0f);
     }
+}
+
+// Stars that pop outwards and hearts that float up, around `at`.
+static void Celebrate(Vector3 at, int stars, int hearts)
+{
+    static const Vector3 kStar[3] = { { 1.0f, 0.93f, 0.55f }, { 1.0f, 0.8f, 0.86f }, { 0.8f, 0.93f, 1.0f } };
+    for (int i = 0; i < stars; i++) {
+        const float a = Rand01() * 2 * kPi, speed = 1.4f + Rand01() * 2.4f;
+        AddSpark(at, Vector3{ cosf(a) * speed + 1.2f, fabsf(sinf(a)) * speed + 0.8f, (Rand01() - 0.5f) * 1.2f },
+                 kStar[i % 3], 0.5f + Rand01() * 0.35f, SPARK_STAR, 0.13f + Rand01() * 0.1f, 4.5f);
+    }
+    for (int i = 0; i < hearts; i++)
+        AddSpark(Vector3{ at.x + (Rand01() - 0.5f) * 0.7f, at.y + Rand01() * 0.3f, at.z + 0.2f },
+                 Vector3{ (Rand01() - 0.5f) * 1.2f, 1.1f + Rand01() * 0.9f, 0 }, Vector3{ 1.0f, 0.52f, 0.64f },
+                 0.9f + Rand01() * 0.5f, SPARK_HEART, 0.12f + Rand01() * 0.06f, -0.5f);
 }
 
 static void Judge(int note, double error, double t)
 {
     const double e = std::fabs(error);
     const int j = e <= kPerfect ? J_PERFECT : e <= kGreat ? J_GREAT : J_GOOD;
+    const int action = gNoteAction[note];
     gNoteState[note] = (uint8_t)(j + 1);
     gNoteWhen[note] = (float)t;
     gCount[j]++;
     gCombo++;
     gMaxCombo = std::max(gMaxCombo, gCombo);
     gScore += (int)std::lround(kPoints[j] * (1.0 + std::min(gCombo, 100) * 0.02));
+    gStreak += j == J_PERFECT ? 1.0f : j == J_GREAT ? 0.6f : 0.3f;
     gJudgeKind = j;
     gJudgeAge = 0.0f;
     gComboPop = 1.0f;
+
     Vector3 at = NotePosition(note);
     at.y += 0.2f;
-    Burst(at, kActionColor[gNoteAction[note]], j == J_PERFECT ? 10 : j == J_GREAT ? 7 : 4);
+    Burst(at, kActionColor[action], j == J_PERFECT ? 8 : j == J_GREAT ? 6 : 4);
+
+    // Each action has its own instrument, and the note climbs with the streak.
+    const float semitones = SfxStreakSemitones(gCombo);
+    PlaySfx(SFX_HOP + action, semitones, j == J_PERFECT ? 1.0f : j == J_GREAT ? 0.75f : 0.5f);
+
+    if (j == J_PERFECT) {
+        // A perfect hit always gets a twinkle, stars, a ring of light and two new flowers.
+        PlaySfx(SFX_TWINKLE, semitones);
+        gJoyKick = 1.0f;
+        Celebrate(at, 5 + (int)(gJoy * 4.0f), gJoy > 0.3f ? 1 + (int)(gJoy * 2.0f) : 0);
+        gRings[gNextRing++ % kRingCount] = Ring{ Vector3{ at.x, PathHeight(at.x) + 0.04f, 0 }, 0.0f };
+        AddBloom(at.x + (Rand01() - 0.5f) * 0.8f, -1.25f - Rand01() * 0.7f);
+        AddBloom(at.x + (Rand01() - 0.5f) * 0.8f, 1.8f + Rand01() * 0.6f);
+    }
+
+    if (gCombo == 10 || gCombo == 25 || gCombo == 50 || (gCombo >= 100 && gCombo % 50 == 0)) {
+        gMilestone = gCombo;
+        gMilestoneAge = 0.0f;
+        PlaySfx(SFX_MILESTONE);
+        Celebrate(Vector3{ gScene.worldX + 0.4f, PathHeight(gScene.worldX) + 1.4f, 0.2f }, 10, 8);
+    }
 }
 
 static void Miss(int note, double t)
@@ -807,9 +969,11 @@ static void Miss(int note, double t)
     gNoteWhen[note] = (float)t;
     gCount[J_MISS]++;
     gCombo = 0;
+    gStreak = 0.0f;
     gJudgeKind = J_MISS;
     gJudgeAge = 0.0f;
     CatDo(ACT_STUMBLE);
+    PlaySfx(SFX_MISS);
 }
 
 // The player asked for `action` at song time `t`: the cat does it, and the
@@ -828,20 +992,22 @@ static void Press(int action, double t)
     }
 }
 
-static void FinishGame()
-{
-    gPlayer.playing.store(false);
-    for (size_t i = 0; i < gNoteState.size(); i++)
-        if (!gNoteState[i]) { gNoteState[i] = 4; gCount[J_MISS]++; }
-    gState = ST_RESULTS;
-    SaveSettings();
-}
-
 static float Accuracy()
 {
     const int judged = gCount[0] + gCount[1] + gCount[2] + gCount[3];
     if (judged == 0) return 1.0f;
     return (gCount[0] * kAccWeight[0] + gCount[1] * kAccWeight[1] + gCount[2] * kAccWeight[2]) / (float)judged;
+}
+
+static void FinishGame()
+{
+    gPlayer.playing.store(false);
+    for (size_t i = 0; i < gNoteState.size(); i++)
+        if (!gNoteState[i]) { gNoteState[i] = 4; gCount[J_MISS]++; }
+    gEndJoy = std::clamp((Accuracy() - 0.6f) / 0.35f, 0.0f, 1.0f) * 0.85f;
+    for (Bloom& b : gBlooms) b.x = -1e9f;
+    gState = ST_RESULTS;
+    SaveSettings();
 }
 
 static void UpdatePlaying(double t)
@@ -931,14 +1097,51 @@ static void UpdateScene(float dt, double t)
     s.day += (day - s.day) * std::min(1.0f, dt * 1.5f);
     s.camY += (PathHeight(s.worldX) - s.camY) * std::min(1.0f, dt * 3.0f);
 
+    // Happiness follows the streak: it builds with every hit and drains fast after a miss.
+    float joyTarget = gJoy;
+    if (gState == ST_PLAYING) joyTarget = 1.0f - expf(-gStreak / 18.0f);
+    else if (gState == ST_RESULTS) joyTarget = gEndJoy;
+    else if (!PathFollowsSong()) joyTarget = 0.0f;
+    gJoy += (joyTarget - gJoy) * std::min(1.0f, dt * (joyTarget > gJoy ? 3.0f : 5.0f));
+    gJoyKick *= expf(-dt * 7.0f);
+    gMilestoneAge += dt;
+
     for (int a = 0; a < ACT_COUNT; a++) s.glow[a] = gHeld[a] ? 1.0f : s.glow[a] * expf(-dt * 9.0f);
     if (!frozen) {
         gCatActionAge += dt;
+        s.wag += dt * (2.6f + 5.0f * gJoy);
+        for (Ring& r : gRings) r.age += dt;
         for (Spark& p : gSparks) {
             if (p.life <= 0.0f) continue;
             p.pos = Vector3Add(p.pos, Vector3Scale(p.vel, dt));
-            p.vel.y -= 7.0f * dt;
+            p.vel.y -= p.gravity * dt;
             p.life -= dt;
+        }
+
+        if (gState == ST_PLAYING || gState == ST_RESULTS) {
+            const float catX = s.worldX, catY = PathHeight(catX);
+            // A happy cat gives off hearts, and at full tilt it trails stars.
+            gHeartTimer -= dt;
+            if (gJoy > 0.3f && gHeartTimer <= 0.0f) {
+                gHeartTimer = 1.2f - 0.85f * gJoy;
+                AddSpark(Vector3{ catX + 0.45f, catY + 1.75f, 0.25f }, Vector3{ -0.5f - Rand01() * 0.6f, 0.9f + Rand01() * 0.5f, 0 },
+                         Vector3{ 1.0f, 0.52f, 0.64f }, 1.2f, SPARK_HEART, 0.11f + 0.07f * gJoy, -0.4f);
+            }
+            gStarTimer -= dt;
+            if (gJoy > 0.6f && gStarTimer <= 0.0f) {
+                gStarTimer = 0.11f;
+                AddSpark(Vector3{ catX - 0.9f, catY + 0.8f + Rand01() * 0.6f, (Rand01() - 0.5f) * 0.4f },
+                         Vector3{ -1.2f, 0.3f + Rand01() * 0.5f, 0 }, Vector3{ 1.0f, 0.93f, 0.6f }, 0.5f, SPARK_STAR, 0.09f + Rand01() * 0.05f, 1.0f);
+            }
+            // Flowers pop up ahead of the cat; the happier it is, the more of them.
+            if (gState == ST_PLAYING) {
+                if (catX - gBloomMark > 20.0f) gBloomMark = catX;
+                while (catX - gBloomMark > 0.55f) {
+                    gBloomMark += 0.55f;
+                    if (Rand01() < gJoy * 1.15f)
+                        AddBloom(gBloomMark + 2.5f + Rand01() * 4.5f, Rand01() < 0.62f ? -1.25f - Rand01() * 1.7f : 1.8f + Rand01() * 1.1f);
+                }
+            }
         }
     }
     gJudgeAge += dt;
@@ -960,6 +1163,81 @@ static void Poly2(float cx, float cy, float rx, float ry, int sides, float turn,
     }
 }
 
+static float Wrap(float v, float m)
+{
+    v = fmodf(v, m);
+    return v < 0.0f ? v + m : v;
+}
+
+static void Heart2(float cx, float cy, float size, Color c)
+{
+    Poly2(cx - size * 0.48f, cy - size * 0.25f, size * 0.55f, size * 0.55f, 8, 0, c);
+    Poly2(cx + size * 0.48f, cy - size * 0.25f, size * 0.55f, size * 0.55f, 8, 0, c);
+    DrawTriangle(Vector2{ cx - size, cy - size * 0.05f }, Vector2{ cx, cy + size * 1.05f }, Vector2{ cx + size, cy - size * 0.05f }, c);
+}
+
+// Rays turning slowly around the sun or moon. They stretch on every perfect hit.
+static void Rays(float cx, float cy, float inner, float outer, int count, Vector3 col, float alpha)
+{
+    if (alpha <= 0.01f) return;
+    const Color c = ToColor(col, alpha);
+    for (int i = 0; i < count; i++) {
+        const float a = gScene.time * 0.3f + i * 2 * kPi / count;
+        const float len = outer + 5.0f * sinf(gScene.time * 3.0f + i * 1.7f) + 9.0f * gJoyKick;
+        DrawTriangle(Vector2{ cx + cosf(a - 0.09f) * inner, cy + sinf(a - 0.09f) * inner }, Vector2{ cx + cosf(a) * len, cy + sinf(a) * len },
+                     Vector2{ cx + cosf(a + 0.09f) * inner, cy + sinf(a + 0.09f) * inner }, c);
+    }
+}
+
+static void Rainbow(float horizonY, float alpha)
+{
+    static const Color kBands[6] = { { 255, 150, 160, 255 }, { 255, 196, 140, 255 }, { 255, 236, 150, 255 },
+                                     { 170, 232, 170, 255 }, { 150, 206, 255, 255 }, { 196, 170, 250, 255 } };
+    const float cx = gVW * 0.40f, cy = horizonY + 34.0f, outer = horizonY * 0.92f + 34.0f;
+    const int segments = 26;
+    for (int b = 0; b < 6; b++) {
+        const float r0 = outer - b * 5.0f, r1 = r0 - 5.0f;
+        const Color c = Fade(kBands[b], alpha * 0.55f);
+        for (int i = 0; i < segments; i++) {
+            const float a0 = kPi + kPi * i / segments, a1 = kPi + kPi * (i + 1) / segments;
+            const Vector2 p00 = { cx + cosf(a0) * r0, cy + sinf(a0) * r0 }, p01 = { cx + cosf(a1) * r0, cy + sinf(a1) * r0 };
+            const Vector2 p10 = { cx + cosf(a0) * r1, cy + sinf(a0) * r1 }, p11 = { cx + cosf(a1) * r1, cy + sinf(a1) * r1 };
+            DrawTriangle(p00, p10, p01, c);
+            DrawTriangle(p01, p10, p11, c);
+        }
+    }
+}
+
+// Soft lights that drift up through the sky, and petals on the wind. Both
+// thicken as the streak grows. `front` draws the few petals that pass in
+// front of the world.
+static void JoyParticles(float horizonY, bool front)
+{
+    static const Color kLights[4] = { { 255, 236, 170, 255 }, { 255, 190, 210, 255 }, { 190, 226, 255, 255 }, { 214, 196, 255, 255 } };
+    static const Color kPetals[3] = { { 255, 190, 205, 255 }, { 255, 240, 236, 255 }, { 255, 214, 170, 255 } };
+    const float time = gScene.time, joy = gJoy;
+    if (joy < 0.03f) return;
+
+    if (!front) {
+        const float span = horizonY * 1.3f, lights = joy * 18.0f;
+        for (int i = 0; i < (int)lights + 1; i++) {
+            const float x = Wrap(Hash01(i, 101) * gVW + sinf(time * 0.4f + i) * 12.0f, (float)gVW);
+            const float y = span - Wrap(Hash01(i, 102) * span + time * (5.0f + Hash01(i, 103) * 8.0f), span);
+            const float r = 3.0f + Hash01(i, 104) * 5.0f;
+            const float a = (0.13f + 0.08f * sinf(time * 2.0f + i)) * std::clamp(lights - i, 0.0f, 1.0f);
+            Poly2(x, y, r, r, 8, 0, Fade(kLights[i & 3], a));
+            Poly2(x, y, r * 0.45f, r * 0.45f, 6, 0, Fade(kLights[i & 3], a * 1.5f));
+        }
+    }
+    const float petals = joy * (front ? 10.0f : 30.0f);
+    const int seed = front ? 140 : 110;
+    for (int i = 0; i < (int)petals + 1; i++) {
+        const float x = Wrap(Hash01(i, seed + 1) * gVW - time * (14.0f + Hash01(i, seed + 2) * 12.0f) + sinf(time * 1.3f + i) * 6.0f, (float)gVW);
+        const float y = Wrap(Hash01(i, seed + 3) * gVH + time * (16.0f + Hash01(i, seed + 4) * 14.0f), gVH * (front ? 0.92f : 0.8f));
+        Poly2(x, y, 2.4f, 1.3f, 4, time * 3.0f + i, Fade(kPetals[i % 3], (front ? 0.75f : 0.9f) * std::clamp(petals - i, 0.0f, 1.0f)));
+    }
+}
+
 // Sky, sun and moon, stars, clouds and two rows of distant hills, all flat 2D.
 static void DrawSky(float horizonY)
 {
@@ -978,16 +1256,20 @@ static void DrawSky(float horizonY)
         }
     }
 
+    Rainbow(horizonY, std::clamp((gJoy - 0.65f) / 0.25f, 0.0f, 1.0f));
+
     // The sun sinks during the first part of the song; the moon rises for the last.
     const float sunT = std::clamp(s.day / 0.62f, 0.0f, 1.0f), moonT = std::clamp((s.day - 0.6f) / 0.4f, 0.0f, 1.0f);
     const float pulse = 1.0f + 0.05f * s.bass;
     if (sunT < 1.0f) {
         const float y = horizonY * (0.22f + 0.82f * sunT * sunT);
+        Rays(gVW * 0.76f, y, 21 * pulse, 40.0f, 12, Mix(p.sun, Vector3{ 1, 1, 0.9f }, 0.5f), 0.5f * gJoy);
         Poly2(gVW * 0.76f, y, 26 * pulse, 26 * pulse, 12, 0, ToColor(Mix(p.sun, Vector3{ 1, 1, 1 }, 0.2f), 0.25f));
         Poly2(gVW * 0.76f, y, 17 * pulse, 17 * pulse, 10, 0, ToColor(Mix(p.sun, Vector3{ 1, 1, 0.9f }, 0.5f)));
     }
     if (moonT > 0.0f) {
         const float y = horizonY * (1.05f - 0.8f * moonT * (2 - moonT));
+        Rays(gVW * 0.27f, y, 16 * pulse, 30.0f, 10, Vector3{ 0.94f, 0.95f, 1.0f }, 0.35f * gJoy * moonT);
         Poly2(gVW * 0.27f, y, 13 * pulse, 13 * pulse, 9, 0.3f, Color{ 240, 242, 255, 255 });
         Poly2(gVW * 0.27f + 5, y - 3, 10, 10, 8, 0.3f, ToColor(Mix(p.skyTop, p.skyBottom, std::clamp(y / horizonY, 0.0f, 1.0f))));
     }
@@ -1015,6 +1297,7 @@ static void DrawSky(float horizonY)
                          Vector2{ x + (Hash01(j, 41 + layer) - 0.5f) * width * 0.4f, base - peak }, ToColor(col));
         }
     }
+    JoyParticles(horizonY, false);
 }
 
 static Camera3D gCamera;
@@ -1068,7 +1351,8 @@ static void DrawScenery()
     static const Vector3 kLeaf[5] = { { 0.47f, 0.72f, 0.42f }, { 0.38f, 0.64f, 0.44f }, { 0.60f, 0.76f, 0.40f }, { 0.96f, 0.66f, 0.42f }, { 0.96f, 0.62f, 0.68f } };
     static const Vector3 kPetal[4] = { { 1.0f, 0.86f, 0.4f }, { 1.0f, 0.62f, 0.7f }, { 0.75f, 0.7f, 1.0f }, { 1.0f, 1.0f, 1.0f } };
     const Palette& p = gPalette;
-    const float bop = 1.0f + 0.07f * gScene.beat;
+    const float bop = 1.0f + (0.07f + 0.18f * gJoy) * gScene.beat;   // everything dances harder on a streak
+    const float lit = std::max(p.lamps, gJoy * 0.7f);                // and lamps come on even by day
     const Vector3 white = { 1, 1, 1 };
     const Vector3 night = Mix(white, Vector3{ 0.7f, 0.8f, 1.0f }, p.stars);   // leaves cool down after dark
     const float spacing = 2.4f;
@@ -1076,21 +1360,22 @@ static void DrawScenery()
 
     for (int s = s0; s <= s1; s++) {
         const float fx = s * spacing;
+        const float sway = 0.08f * gJoy * sinf(gScene.time * 3.2f + fx);
         {   // beside the path: flowers, bushes, rocks, mushrooms, lamps
             const float r = Hash01(s, 2), x = fx + Hash01(s, 3) * 1.8f, z = -1.9f - Hash01(s, 4) * 1.3f;
             const Vector3 at = { x, GroundHeight(x, z), z };
             if (r < 0.24f) {
                 for (int k = 0; k < 3; k++) {
                     const float ox = x + (Hash01(s, 50 + k) - 0.5f) * 0.8f, oz = z + (Hash01(s, 60 + k) - 0.5f) * 0.6f;
-                    DrawShape(sFlower, Place(Vector3{ ox, GroundHeight(ox, oz), oz }, 1.0f, 0.0f, bop), kPetal[Hash(s, 70 + k) & 3]);
+                    DrawShape(sFlower, Place(Vector3{ ox, GroundHeight(ox, oz), oz }, 1.0f, sway, bop), kPetal[Hash(s, 70 + k) & 3]);
                 }
-            } else if (r < 0.38f) DrawShape(sBush, Place(at, 0.8f + Hash01(s, 5) * 0.5f, 0.0f, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
+            } else if (r < 0.38f) DrawShape(sBush, Place(at, 0.8f + Hash01(s, 5) * 0.5f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 6) % 3], night));
             else if (r < 0.46f) DrawShape(sRock, Place(at, 0.8f + Hash01(s, 5)));
-            else if (r < 0.52f) DrawShape(sMushroom, Place(at, 1.0f, 0.0f, bop));
+            else if (r < 0.52f) DrawShape(sMushroom, Place(at, 1.0f, sway, bop));
             else if (r < 0.60f) {
                 DrawShape(sLampPost, Place(at));
-                DrawShape(sLamp, Place(at), white, 0.25f + 0.75f * p.lamps);
-                AddHalo(Vector3{ at.x, at.y + 1.5f, at.z + 0.15f }, 0.5f + 0.06f * gScene.beat, kWarm, 0.13f * p.lamps);
+                DrawShape(sLamp, Place(at), white, 0.25f + 0.75f * lit);
+                AddHalo(Vector3{ at.x, at.y + 1.5f, at.z + 0.15f }, 0.5f + 0.06f * gScene.beat, kWarm, 0.13f * lit);
             }
         }
         {   // middle distance: round trees and pines
@@ -1099,9 +1384,9 @@ static void DrawScenery()
                 const Vector3 at = { x, GroundHeight(x, z), z };
                 const float size = 0.95f + Hash01(s, 11) * 0.5f;
                 const Vector3 leaf = Vector3Multiply(kLeaf[Hash(s, 12) % 5], night);
-                DrawShape(sTrunk, Place(at, size));
-                if (Hash(s, 13) & 1) DrawShape(sCrown, Place(at, size, 0.0f, bop), leaf);
-                else DrawShape(sPine, Place(at, size, 0.0f, bop), Vector3Multiply(kLeaf[Hash(s, 12) % 3], Vector3Scale(night, 0.85f)));
+                DrawShape(sTrunk, Place(at, size, sway));
+                if (Hash(s, 13) & 1) DrawShape(sCrown, Place(at, size, sway, bop), leaf);
+                else DrawShape(sPine, Place(at, size, sway, bop), Vector3Multiply(kLeaf[Hash(s, 12) % 3], Vector3Scale(night, 0.85f)));
             }
         }
         {   // far: bigger trees and the odd house with a lit window
@@ -1111,27 +1396,47 @@ static void DrawScenery()
                 const float hz = -9.5f - Hash01(s, 16) * 2.0f;
                 const Vector3 home = { x, GroundHeight(x, hz), hz };
                 DrawShape(sHouse, Place(home, 1.25f));
-                DrawShape(sWindows, Place(home, 1.25f), white, 0.2f + 0.8f * p.lamps);
-                AddHalo(Vector3{ home.x + 0.38f, home.y + 0.88f, home.z + 1.0f }, 0.55f, kWarm, 0.12f * p.lamps);
+                DrawShape(sWindows, Place(home, 1.25f), white, 0.2f + 0.8f * lit);
+                AddHalo(Vector3{ home.x + 0.38f, home.y + 0.88f, home.z + 1.0f }, 0.55f, kWarm, 0.12f * lit);
             } else if (r < 0.62f) {
                 const float size = 1.3f + Hash01(s, 17) * 0.8f;
-                DrawShape(sTrunk, Place(at, size));
+                DrawShape(sTrunk, Place(at, size, sway));
                 const bool pine = (Hash(s, 18) % 3) != 0;
-                DrawShape(pine ? sPine : sCrown, Place(at, size, 0.0f, bop), Vector3Multiply(kLeaf[Hash(s, 19) % (pine ? 3 : 5)], Vector3Scale(night, 0.88f)));
+                DrawShape(pine ? sPine : sCrown, Place(at, size, sway, bop), Vector3Multiply(kLeaf[Hash(s, 19) % (pine ? 3 : 5)], Vector3Scale(night, 0.88f)));
             }
         }
         {   // in front of the path: only low things, so nothing hides the cat
             const float r = Hash01(s, 24), x = fx + Hash01(s, 25) * 2.0f, z = 2.0f + Hash01(s, 26) * 1.6f;
             const Vector3 at = { x, GroundHeight(x, z), z };
-            if (r < 0.2f) DrawShape(sFlower, Place(at, 1.2f, 0.0f, bop), kPetal[Hash(s, 27) & 3]);
+            if (r < 0.2f) DrawShape(sFlower, Place(at, 1.2f, sway, bop), kPetal[Hash(s, 27) & 3]);
             else if (r < 0.3f) DrawShape(sRock, Place(at, 0.7f));
-            else if (r < 0.38f) DrawShape(sBush, Place(at, 0.6f, 0.0f, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
+            else if (r < 0.38f) DrawShape(sBush, Place(at, 0.6f, sway, bop), Vector3Multiply(kLeaf[Hash(s, 28) % 3], night));
         }
+        // Small pastel butterflies join in behind the path once the streak is going.
+        if (gJoy > 0.4f && Hash01(s, 90) < (gJoy - 0.4f) * 1.4f) {
+            static const Vector3 kPastel[3] = { { 1.0f, 0.72f, 0.84f }, { 1.0f, 0.92f, 0.6f }, { 0.82f, 0.74f, 1.0f } };
+            const float phase = Hash01(s, 91) * 6.283f, time = gScene.time;
+            const float x = fx + Hash01(s, 92) * 2.0f + 0.5f * sinf(time * 0.9f + phase), z = -2.2f - Hash01(s, 93) * 3.2f;
+            const float y = GroundHeight(x, z) + 1.0f + Hash01(s, 94) * 1.3f + 0.25f * sinf(time * 2.1f + phase);
+            const float flap = 0.1f + 1.0f * (0.5f + 0.5f * sinf(time * 16.0f + phase));
+            const Matrix body = Place(Vector3{ x, y, z }, 0.5f);
+            DrawShape(sWing, MatrixMultiply(MatrixRotateY(-flap), body), kPastel[Hash(s, 95) % 3], 0.6f);
+            DrawShape(sWing, MatrixMultiply(MatrixRotateY(kPi + flap), body), kPastel[Hash(s, 95) % 3], 0.6f);
+        }
+    }
+
+    // Flowers that bloomed because of the streak: they spring up with a bounce.
+    for (const Bloom& b : gBlooms) {
+        if (b.x < gViewCentre - gViewHalf * 1.6f - 2.0f || b.x > gViewCentre + gViewHalf * 1.6f + 2.0f) continue;
+        const float k = std::clamp((gScene.time - b.born) * 3.5f, 0.0f, 1.0f);
+        const float size = b.size * k * (1.0f + 0.45f * sinf(k * kPi));
+        DrawShape(sFlower, Place(Vector3{ b.x, GroundHeight(b.x, b.z), b.z }, size, 0.1f * gJoy * sinf(gScene.time * 3.2f + b.x), bop), kPetal[b.tint]);
     }
 }
 
 static void DrawCat(float x, bool walking)
 {
+    const float joy = gJoy;
     const float ground = PathHeight(x);
     const float u = gCatAction >= 0 ? gCatActionAge / kActionTime[gCatAction] : 1.0f;
     const float arc = u < 1.0f ? sinf(kPi * u) : 0.0f;
@@ -1145,27 +1450,30 @@ static void DrawCat(float x, bool walking)
     }
     const float phase = x * 2.4f;
     const float swing = walking && lift < 0.05f ? 0.55f * sinf(phase) : 0.0f;
-    const float bob = walking ? 0.035f * fabsf(cosf(phase)) : 0.0f;
+    // A happy cat prances: a bigger bounce in its step, and a little hop on every beat.
+    const float bob = walking ? (0.035f + 0.06f * joy) * fabsf(cosf(phase)) + 0.06f * joy * gScene.beat : 0.0f;
     const float slope = atanf((PathHeight(x + 0.4f) - PathHeight(x - 0.4f)) / 0.8f);
 
     // The whole cat pivots around its back hips, so pitching up reads as standing.
+    // It stretches upwards for an instant on every perfect hit.
     const Vector3 hips = { -0.33f, 0.42f, 0.0f };
     Matrix root = MatrixTranslate(-hips.x, -hips.y, -hips.z);
     root = MatrixMultiply(root, MatrixRotateX(roll));
     root = MatrixMultiply(root, MatrixRotateZ(pitch + slope * 0.7f));
     root = MatrixMultiply(root, MatrixTranslate(hips.x, hips.y, 0.0f));
-    root = MatrixMultiply(root, MatrixScale(kCatSize, kCatSize, kCatSize));
+    root = MatrixMultiply(root, MatrixScale(kCatSize, kCatSize * (1.0f + 0.1f * gJoyKick), kCatSize));
     root = MatrixMultiply(root, MatrixTranslate(x, ground + lift + bob, 0.0f));
 
     DrawShape(sCatBody, MatrixMultiply(MatrixTranslate(0, 0.62f, 0), root));
 
-    // The head stays roughly level and is turned a little towards the camera.
+    // The head stays roughly level, is turned a little towards the camera, and nods along when happy.
     Matrix head = MatrixRotateY(-0.35f);
-    head = MatrixMultiply(head, MatrixRotateZ(-pitch * 0.55f + 0.05f * sinf(gScene.time * 1.3f)));
+    head = MatrixMultiply(head, MatrixRotateZ(-pitch * 0.55f + 0.05f * sinf(gScene.time * 1.3f) + 0.09f * joy * sinf(gScene.wag * 1.5f)));
     head = MatrixMultiply(head, MatrixTranslate(0.52f, 1.0f + 0.02f * sinf(phase * 2), 0));
     DrawShape(sCatHead, MatrixMultiply(head, root));
+    if (joy > 0.3f) DrawShape(sCatBlush, MatrixMultiply(head, root));
     const bool blinking = fmodf(gScene.time, 3.7f) < 0.12f;
-    const bool pleased = gJudgeKind == J_PERFECT && gJudgeAge < 0.3f;
+    const bool pleased = (gJudgeKind == J_PERFECT && gJudgeAge < 0.3f) || joy > 0.6f;   // eyes smile shut
     const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.15f : pleased ? 0.4f : 1.0f, 1.0f), MatrixTranslate(0, 0.07f, 0));
     DrawShape(sCatEyes, MatrixMultiply(MatrixMultiply(eyes, head), root));
 
@@ -1178,8 +1486,9 @@ static void DrawCat(float x, bool walking)
         DrawShape(sCatLeg, MatrixMultiply(leg, root));
     }
 
-    const float sway = 0.18f * sinf(gScene.time * 2.6f) + 0.12f * gScene.beat;
-    const Matrix t1 = MatrixMultiply(MatrixRotateZ(0.95f + sway), MatrixTranslate(-0.55f, 0.72f, 0));
+    // The tail goes up and wags faster with the mood.
+    const float sway = (0.18f + 0.25f * joy) * sinf(gScene.wag) + 0.12f * gScene.beat;
+    const Matrix t1 = MatrixMultiply(MatrixRotateZ(0.95f - 0.4f * joy + sway), MatrixTranslate(-0.55f, 0.72f, 0));
     const Matrix t2 = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.5f + sway), MatrixTranslate(0, 0.32f, 0)), t1);
     const Matrix t3 = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.55f + sway), MatrixTranslate(0, 0.32f, 0)), t2);
     DrawShape(sCatTail, MatrixMultiply(t1, root));
@@ -1221,8 +1530,8 @@ static void DrawNotes(double t)
                 const float flap = 0.1f + 1.0f * (0.5f + 0.5f * sinf(gScene.time * (hit ? 40.0f : 14.0f + 10.0f * gScene.high) + i));
                 const Matrix body = Place(pos, 1.35f * (hit ? 1.0f - since / 0.9f : 1.0f));
                 DrawShape(sButterflyBody, body, tint);
-                DrawShape(sWing, MatrixMultiply(MatrixRotateY(-flap), body), tint, 0.75f);
-                DrawShape(sWing, MatrixMultiply(MatrixRotateY(kPi + flap), body), tint, 0.75f);
+                DrawShape(sWing, MatrixMultiply(MatrixRotateY(-flap), body), Vector3Multiply(tint, Vector3{ 0.667f, 0.882f, 0.98f }), 0.75f);
+                DrawShape(sWing, MatrixMultiply(MatrixRotateY(kPi + flap), body), Vector3Multiply(tint, Vector3{ 0.667f, 0.882f, 0.98f }), 0.75f);
                 break;
             }
             case ACT_RING: {
@@ -1287,9 +1596,24 @@ static void DrawSparksAndShadows()
         }
     }
 
+    for (const Ring& ring : gRings) {
+        if (ring.age > 0.45f) continue;
+        const float k = ring.age / 0.45f;
+        DrawShape(sRing, Place(ring.pos, 0.35f + 2.0f * k), Vector3{ 1.0f, 0.96f, 0.8f }, 1.0f, 0.7f * (1.0f - k) * (1.0f - k));
+    }
+
     for (const Spark& s : gSparks) {
         if (s.life <= 0.0f) continue;
-        DrawShape(sSpark, Place(s.pos, 0.1f + s.life * 0.3f, s.life * 9.0f), s.col, 1.0f, std::min(1.0f, s.life * 4.0f));
+        const float k = s.life / s.span;   // 1 when born, 0 when gone
+        if (s.kind == SPARK_SHARD) {
+            DrawShape(sSpark, Place(s.pos, s.size + s.life * 0.3f, s.life * 9.0f), s.col, 1.0f, std::min(1.0f, s.life * 4.0f));
+        } else if (s.kind == SPARK_STAR) {
+            const float pop = sinf(std::min(1.0f, (1.0f - k) * 6.0f) * kPi * 0.5f);   // springs open, then shrinks
+            DrawShape(sStar, Place(s.pos, s.size * pop * (0.45f + 0.55f * k), (1.0f - k) * 4.0f), s.col, 1.0f, std::min(1.0f, k * 3.0f));
+        } else {
+            const float pop = sinf(std::min(1.0f, (1.0f - k) * 5.0f) * kPi * 0.5f);
+            DrawShape(sHeart, Place(s.pos, s.size * pop, 0.25f * sinf(s.life * 7.0f)), s.col, 1.0f, std::min(1.0f, k * 2.5f));
+        }
     }
 }
 
@@ -1304,16 +1628,24 @@ static void RenderWorld(double t)
     const float dist = std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
     gViewHalf = dist * tanHalf * aspect;
     gViewCentre = s.worldX + gViewHalf * 0.47f;                        // keeps the cat a quarter of the way in
-    gCamera.position = Vector3{ gViewCentre, s.camY + 1.3f + 1.3f * dist / 9.8f, dist };
+    gCamera.position = Vector3{ gViewCentre, s.camY + 1.3f + 1.3f * dist / 9.8f + 0.05f * gJoyKick, dist };
     gCamera.target = Vector3{ gViewCentre, s.camY + 1.3f, 0.0f };
     gCamera.up = Vector3{ 0, 1, 0 };
-    gCamera.fovy = 34.0f;
+    gCamera.fovy = 34.0f - 0.7f * gJoyKick;   // a tiny punch-in on every perfect hit
     gCamera.projection = CAMERA_PERSPECTIVE;
 
     gLight.camera = gCamera.position;
     gLight.lightDir = Vector3Normalize(Vector3{ -0.45f, 0.8f, 0.5f });
     gLight.sun = gPalette.sun;
-    gLight.ambient = gPalette.ambient;
+    gLight.ambient = Vector3Scale(gPalette.ambient, 1.0f + 0.12f * gJoy);
+    gLight.saturation = 1.0f + 0.35f * gJoy;
+    {   // The sky gets richer along with everything else.
+        Vector3* sky[2] = { &gPalette.skyTop, &gPalette.skyBottom };
+        for (Vector3* c : sky) {
+            const float lum = 0.3f * c->x + 0.59f * c->y + 0.11f * c->z;
+            *c = Vector3{ lum + (c->x - lum) * gLight.saturation, lum + (c->y - lum) * gLight.saturation, lum + (c->z - lum) * gLight.saturation };
+        }
+    }
     gLight.fog = Mix(gPalette.skyBottom, gPalette.skyTop, 0.12f);
     gLight.fogStart = dist + 6.0f;
     gLight.fogEnd = dist + 30.0f;
@@ -1338,6 +1670,9 @@ static void RenderWorld(double t)
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
     EndMode3D();
+
+    JoyParticles(horizonY, true);
+    if (gJoyKick > 0.02f) DrawRectangle(0, 0, gVW, gVH, Color{ 255, 244, 210, (unsigned char)(26.0f * gJoyKick) });   // a soft warm glow, not a flash
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,7 +1713,9 @@ static bool Button(int x, int y, int w, int h, const char* label, int style = 0)
     DrawRectangle(x, y, w, h, bg);
     DrawRectangleLines(x, y, w, h, style == 0 ? kBorder : Color{ 70, 46, 60, 120 });
     Text(label, x + w / 2, y + (h - 10) / 2, 10, fg, 1, false);
-    return hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool clicked = hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (clicked) PlaySfx(SFX_CLICK);
+    return clicked;
 }
 
 static void Panel(int w, int h, int& left, int& top, bool right = false)
@@ -1469,7 +1806,7 @@ static bool Stepper(int left, int y, int w, const char* label, const char* value
 static void DrawReady()
 {
     int left, top;
-    const int pw = 300, ph = 262;
+    const int pw = 300, ph = 284;
     Panel(pw, ph, left, top, true);
     const int cx = left + pw / 2;
     const int x0 = left + 16, inner = pw - 32;
@@ -1497,15 +1834,17 @@ static void DrawReady()
         gCfg.speed = std::clamp(std::round((gCfg.speed + delta * 0.1f) * 10.0f) / 10.0f, 0.6f, 2.0f);
     if (Stepper(x0, top + 142, inner, "Audio offset", TextFormat("%+d ms", gCfg.offsetMs), delta))
         gCfg.offsetMs = std::clamp(gCfg.offsetMs + delta * 5, -300, 300);
+    if (Stepper(x0, top + 164, inner, "Sound effects", TextFormat("%d%%", gCfg.sfx * 10), delta))
+        gCfg.sfx = std::clamp(gCfg.sfx + delta, 0, 10);
 
     const int tw = (inner - 4) / 2;
-    if (Button(x0, top + 168, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
-    if (Button(x0 + tw + 4, top + 168, tw, 20, gCfg.hints ? "Key hints: on" : "Key hints: off", gCfg.hints ? 2 : 0)) gCfg.hints = !gCfg.hints;
+    if (Button(x0, top + 190, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
+    if (Button(x0 + tw + 4, top + 190, tw, 20, gCfg.hints ? "Key hints: on" : "Key hints: off", gCfg.hints ? 2 : 0)) gCfg.hints = !gCfg.hints;
 
-    if (Button(cx - 70, top + 198, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
+    if (Button(cx - 70, top + 220, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
         SaveSettings();
         StartGame();
-    } else if (Button(cx - 70, top + 230, 140, 18, "Choose another song") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 252, 140, 18, "Choose another song") || Key(KEY_ESCAPE)) {
         gState = ST_MENU;
     }
 }
@@ -1524,6 +1863,21 @@ static void DrawHud(double t)
     DrawRectangle(px - 4, lineY - 3, 8, 6, kInk);
 
     Text(TextFormat("%06d", gScore), 10, 8, 20, kInk, 0);
+
+    // Mood: five hearts that fill as the streak grows.
+    for (int i = 0; i < 5; i++) {
+        const float fill = std::clamp(gJoy * 5.0f - i, 0.0f, 1.0f), cx0 = 17.0f + i * 14.0f, cy0 = 38.0f;
+        Heart2(cx0, cy0, 4.5f, Color{ 30, 22, 44, 110 });
+        if (fill > 0.05f) Heart2(cx0, cy0 - (i == (int)(gJoy * 5.0f) ? 1.5f * gJoyKick : 0.0f), 4.5f * fill, Color{ 255, 130, 160, 255 });
+    }
+
+    // Streak milestones get a banner.
+    if (gMilestoneAge < 1.6f) {
+        const char* word = gMilestone >= 100 ? "MEOWGNIFICENT!" : gMilestone >= 50 ? "PAWSOME!" : gMilestone >= 25 ? "LOVELY!" : "CUTE!";
+        static const Color kCheer[3] = { { 255, 214, 230, 255 }, { 255, 240, 170, 255 }, { 200, 232, 255, 255 } };
+        const float in = std::min(1.0f, gMilestoneAge * 6.0f), out = std::clamp((1.6f - gMilestoneAge) / 0.4f, 0.0f, 1.0f);
+        Text(TextFormat("x%d  %s", gMilestone, word), cx, 44 - (int)(8.0f * sinf(in * kPi)), 20, Fade(kCheer[(int)(gMilestoneAge * 8.0f) % 3], out));
+    }
     Text(TextFormat("%.1f%%", Accuracy() * 100.0f), gVW - 10, 8, 10, kInk, 2);
     if (gCombo >= 3) Text(TextFormat("x%d", gCombo), gVW - 10, 22, gComboPop > 0.3f ? 20 : 10, kInk, 2);
 
@@ -1559,7 +1913,8 @@ static void DrawHud(double t)
         static const Color kColors[4] = { { 255, 236, 150, 255 }, { 170, 236, 255, 255 }, { 190, 255, 200, 255 }, { 255, 160, 170, 255 } };
         const Vector2 p = GetWorldToScreenEx(Vector3{ gScene.worldX + 0.3f, PathHeight(gScene.worldX) + 2.3f, 0 }, gCamera, gVW, gVH);
         const float k = gJudgeAge / 0.5f;
-        Text(kNames[gJudgeKind], (int)p.x, (int)(p.y - 14 * k), 10, Fade(kColors[gJudgeKind], 1.0f - k * k));
+        const int size = gJudgeKind == J_PERFECT && gJudgeAge < 0.12f ? 20 : 10;   // a perfect pops big for a moment
+        Text(kNames[gJudgeKind], (int)p.x, (int)(p.y - 14 * k) - (size - 10) / 2, size, Fade(kColors[gJudgeKind], 1.0f - k * k));
     }
     if (gCfg.watch) Text("WATCH MODE", cx, 24, 10, kSoft);
 }
@@ -1650,6 +2005,15 @@ static int SelfTest()
     if (!AnalyzeSong(pcm.data(), pcm.size() / 2, 2, rate, song)) { printf("analysis failed\n"); return 1; }
     const double elapsed = NowSeconds() - start;
     printf("demo track: %.1f s, analyzed in %.0f ms\n", song.duration, elapsed * 1000.0);
+
+    static const char* kSfxName[SFX_COUNT] = { "hop", "bat", "swat", "ring", "twinkle", "miss", "milestone", "click" };
+    std::vector<float> sfx[SFX_COUNT];
+    BuildSfx(sfx);
+    for (int i = 0; i < SFX_COUNT; i++) {
+        double peak = 0.0, energy = 0.0;
+        for (float v : sfx[i]) { peak = std::max(peak, (double)std::fabs(v)); energy += (double)v * v; }
+        printf("sfx %-9s %4.0f ms  peak %.2f  rms %.3f\n", kSfxName[i], sfx[i].size() * 1000.0 / kSfxRate, peak, std::sqrt(energy / sfx[i].size()));
+    }
     const double grid = DemoSixteenthSeconds();
     for (int d = 0; d < DIFF_COUNT; d++) {
         const Chart& c = song.charts[d];
@@ -1671,7 +2035,8 @@ static int SelfTest()
 int main(int argc, char** argv)
 {
     // <audio file>                    start with that song loaded
-    // --selftest                      analysis check, no window
+    // --selftest                      analysis and sound check, no window
+    // --sfx-demo <wav>                writes a short audition of the sound effects
     // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2]
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
@@ -1681,6 +2046,7 @@ int main(int argc, char** argv)
     int winW = 1280, winH = 720, shotDiff = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
+        if (!strcmp(argv[i], "--sfx-demo") && i + 1 < argc) return WriteSfxDemo(argv[i + 1]) ? 0 : 1;
         if (!strcmp(argv[i], "--shot") && i + 1 < argc) shotPath = argv[++i];
         else if (!strcmp(argv[i], "--view") && i + 1 < argc) shotView = argv[++i];
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) shotAt = atof(argv[++i]);
@@ -1699,6 +2065,12 @@ int main(int argc, char** argv)
 
     if (!gSim) {
         InitAudioDevice();
+        // The stream runs from the start so menus have sound; it is rebuilt if a song needs another rate.
+        BuildSfx(gSfxData);
+        gPlayer.stream = LoadAudioStream((unsigned)gPlayer.sampleRate.load(), 32, 2);
+        SetAudioStreamCallback(gPlayer.stream, FeedAudio);
+        PlayAudioStream(gPlayer.stream);
+        gPlayer.hasStream = true;
         LoadSettings();
         PlatformStartKeyInput(GetWindowHandle());
     } else if (shotDiff >= 0) {

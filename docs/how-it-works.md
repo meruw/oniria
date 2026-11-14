@@ -72,9 +72,30 @@ The renderer is deliberately small.
 - The time of day is a palette interpolated between four keys (afternoon, sunset, dusk, night) by the song's progress.
 - Scenery is placed by hashing the position along the path, so the same song always produces the same walk.
 
+## Sound effects
+
+`src/sfx.cpp` builds eight short sounds at startup from decaying sine partials: a marimba bar, a pitch-sliding "bloop", a kalimba tine, a small bell with two detuned fundamentals, a two-note music-box twinkle, a muted thud for misses, a music-box arpeggio for milestones and a menu tick. Each one goes through a low-pass filter around 5.5 kHz and gets a quiet, darker two-tap echo, which is what keeps them soft.
+
+They are mixed inside the same audio callback that plays the song, so they have the same latency as the music. The game thread only pushes small commands (sound, pitch, gain) onto a lock-free queue; up to sixteen voices are resampled and summed on the audio thread.
+
+The hit sound's pitch depends on the streak: the first eight hits climb a major pentatonic scale, and from then on a fixed eight-note figure near the top keeps repeating, so a long streak sounds like a tune and never keeps rising. All four instruments share the same pitch, so two notes at once always sound in unison or an octave apart.
+
+## Happiness
+
+Every hit adds to a streak value (a perfect counts 1, a nice 0.6, an ok 0.3) and a miss empties it. A single number, `gJoy = 1 - exp(-streak / 18)`, eased over time, drives everything festive:
+
+- the cat: bounce in its step, a hop on each beat, tail up and wagging faster, blush, smiling eyes, hearts, a trail of stars;
+- the ground: flowers spawned ahead of the cat with a probability that follows the number, in a ring buffer so they stay where they bloomed;
+- the scenery: how far trees squash and sway on the beat, lamps lit even by day, small pastel butterflies;
+- the sky: sun or moon rays, drifting lights, petals, and a rainbow above 0.65;
+- colour: a saturation and ambient boost applied in the per-triangle lighting.
+
+A perfect hit additionally sets a short pulse that stretches the cat, nudges the camera in by under a degree and lays a faint warm glow over the frame.
+
 ## Checking it without playing
 
 Two command-line modes exist for automated checks:
 
-- `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid.
+- `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
+- `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
 - `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.

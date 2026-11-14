@@ -2,6 +2,22 @@
 
 Newest entries first.
 
+## 2026-11-13: sound, and a world that gets happier
+
+Two requests: hit sounds that feel very satisfying but stay cozy, and a visible reward for every perfect hit that keeps growing for as long as the streak lasts.
+
+**Sound.** All synthesized, no files. The palette is mallets, plucks and a music box, low-passed and given a quiet echo. Each action has its own instrument, and the pitch climbs a pentatonic scale with the streak before settling into a small repeating tune, which turns a good run into a melody on top of the song. Effects are mixed in the song's own audio callback so they are as tight as the music.
+
+**Every perfect hit** gets a music-box twinkle, a burst of stars, a ring of light spreading on the path, two new flowers, a stretch from the cat and a faint warm glow over the screen.
+
+**The streak** feeds one happiness value that everything listens to: the cat prances, blushes, smiles and sheds hearts; flowers spring up ahead of it; trees dance harder; lamps light up; lights and petals drift across the sky; a rainbow appears. Milestones at 10, 25, 50 and 100 get a banner and a fanfare. A miss drains it all within a fraction of a second, which is the point: the contrast is what makes the streak worth protecting.
+
+Decisions worth recording:
+
+- Decorations stay behind the path or beside the cat. Flowers in front of the path are kept short so nothing ever covers an object that has to be read.
+- The perfect-hit glow is a few percent of brightness, not a flash.
+- The effects have been checked for level and length only. Nobody has listened to them in the game yet, so the instrument choices are a first guess.
+
 ## 2026-11-13: polish pass on the cat world
 
 The cozy direction was approved, so this pass cleaned up what the first screenshots showed:

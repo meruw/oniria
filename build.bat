@@ -22,7 +22,7 @@ if not exist "%ROOT%build" mkdir "%ROOT%build"
 cl /nologo /std:c++17 /O2 /fp:fast /EHsc /utf-8 /W3 /MD /DNDEBUG ^
    /I"%ROOT%third_party\raylib\include" ^
    /Fo"%ROOT%build\\" /Fe"%ROOT%build\oniria.exe" ^
-   "%ROOT%src\main.cpp" "%ROOT%src\analysis.cpp" "%ROOT%src\platform_win.cpp" ^
+   "%ROOT%src\main.cpp" "%ROOT%src\analysis.cpp" "%ROOT%src\sfx.cpp" "%ROOT%src\platform_win.cpp" ^
    /link /LIBPATH:"%ROOT%third_party\raylib\lib" ^
    raylib.lib winmm.lib gdi32.lib user32.lib shell32.lib opengl32.lib comdlg32.lib ^
    /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
