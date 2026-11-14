@@ -44,6 +44,16 @@ Notes are then spread over four lanes by pitch: the centroid's quartiles decide 
 
 The game maps lanes to actions per difficulty (`kLaneAction` in `main.cpp`) in a way that guarantees a double always pairs something on the ground with something in the air.
 
+### 4b. Long notes and breathers
+
+A second pass shapes each chart once the loudness envelopes exist.
+
+About once every seven to nine seconds (depending on the difficulty) it looks for the note with the most *sustained* sound after it: the summed band envelopes must stay above 55% of their level just after the onset for the whole length of the long note (1.0 to 1.4 s). The best candidate in each window becomes a long note, and the notes it would overlap are dropped. Music with no sustained sounds simply gets none.
+
+Then it looks for stretches of 45 seconds without a two-second gap, and opens one: the notes in the quietest 2.6 seconds of the stretch are dropped.
+
+In the game every long note is yarn, whatever lane it came from, so there is only ever one at a time and it is always the same key. Holding pays a few points every 150 ms and a bonus at the end; releasing early just stops the points. There is deliberately no way to fail one.
+
 ### 5. The landscape
 
 The path height is the song's loudness averaged over four-second windows, so quiet passages are valleys and loud ones are hilltops. The band loudness and the bass flux are also kept as envelopes, sampled every 8 ms, which the scene reads while playing: trees bop on the kick, stars and fireflies react to the highs.
@@ -125,6 +135,26 @@ What the cat wears is three more shapes built by `BuildCat`: one in head space (
 
 The head is close to an ellipsoid, so hats are lofts of ellipses that follow it: a brim is a ring at the height where the head is that wide, a beanie's cuff hugs it just above the eyes. The head is also so large that a level collar would be hidden inside it, so everything worn round the neck lies in a plane that leans forward, high behind the head and low under the chin, where it shows as a curve across the chest. Things on the back sit behind the point where the head stops covering it.
 
+## Audio calibration
+
+The offset between when sound leaves the program and when it reaches the ears cannot be measured from inside, so the player measures it. The audio thread runs a metronome itself: it starts a tick every 0.6 s at an exact sample and records the time that sample went out. The player taps along with the game keys, which come through the same timestamped input path as in play. Each tap is compared with the nearest tick (plus the same base latency the game assumes while playing), and the median of sixteen taps is the offset. The median, not the mean, so one stray tap does not matter; the median distance from the median is shown as a hint when the taps were uneven. Nothing visual moves with the tick on purpose, since the screen has its own, different delay.
+
+## The guided walk
+
+*How to play* is not a separate mode. It loads the built-in track through the normal path, replaces the analysed charts with a hand-written one (six parts of sixteen beats, the first four beats of each left empty for reading), and starts the game with a flag set. The flag makes the chart's lanes mean actions directly, shows the line of advice, and adds one rule: when a part ends with fewer than half its things answered, those notes are reset and playback seeks back to the start of the part, twice at most.
+
+## Today's goals
+
+The three goals are a function of the date: the day number seeds a small generator that picks three different kinds out of seven and a smaller or larger version of each. Progress towards them is a handful of numbers for the current day in `oniria.save`; when the date changes they are cleared. No clock is trusted beyond the local date, and nothing is fetched.
+
+## The cat's room
+
+A fixed diorama: floorboards, three walls, a window whose glass is drawn in the colour of the sky outside, and one object for each of seven spots, all built from the same boxes, blobs, cones and beams as the rest of the world into a single shape that is rebuilt only when a choice changes. The cat is drawn with the same code as outdoors with the ground forced level. What is owned is one bit per choice, and what is placed is two bits per spot.
+
+## Gamepad
+
+raylib reports the first connected pad in a standard layout. While playing, its d-pad and face buttons are the four actions and are read once a frame, so unlike the keyboard they are stamped with the frame's time (at 120 frames a second that is at most 8 ms late). In menus they stand in for the arrow keys, Enter and Esc.
+
 ## Staying light
 
 - **Frame pacing.** The game sleeps on a high-resolution waitable timer (one per thread) until the next frame is due: 120 frames a second while playing, 60 in menus, 30 in the background, and no drawing at all while minimized. V-sync is still requested, but it is not relied on: a driver can switch it off, and the first measurement of the menu showed the loop spinning more than a whole core for exactly that reason. raylib's own limiter was avoided because it busy-waits part of every frame.
@@ -161,5 +191,7 @@ Two command-line modes exist for automated checks:
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
 - `oniria.exe --sfx-dump folder` writes each sound effect as its own WAV, for measuring them.
+- `oniria.exe --robot log.txt --calibrate` runs the calibration screen and taps along 45 ms late on purpose; `--robot log.txt --lesson` takes the guided walk, ignoring its first part once; `--day n` pretends it is day `n` for the daily goals.
+- More `--shot` views: `calibrate` (with `--tab 0..2` for the phase), `tutorial`, `home` (with `--home 1232103` for what is placed, `--home-tab`, `--home-sel`), and `--today` for a half-finished day on the menu.
 - `oniria.exe --robot log.txt [--diff 0..2] [song file]` is the end-to-end test. The game runs for real, with its window, its audio thread and its raw input thread, but with the master volume at zero. A second thread waits for the song screen, presses Enter, and then presses D F J K through `SendInput` at the times the chart asks for, deliberately a little early or late on some notes and skipping every twenty-fifth; a third of the way in it pauses with Esc and resumes with Enter. Keys are only sent while the game window is in front, so they cannot land in another program. When the song ends the game writes what it measured: for each note the timing that was meant, when the key was really sent and what the game measured; then totals for input, audio, clock drift, frame times, camera travel, what the walk paid and what was saved. After the song it goes back to the menu, opens the wardrobe, moves down to the first hat for sale, checks that the model is trying it on, buys it with Enter if there are fish enough, and logs the fish and what is owned before and after. It does not write the settings file.
 - `oniria.exe --shot out.png [--view menu|ready|play|pause|results|wardrobe|settings] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n] [--tab 0..3] [--unlock-all] [--count] [--closeup] [--size WxH] [--seq n] [--seq-step frames] [--fish n] [--xp n] [--sel n] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame, or with `--seq` a run of frames a few steps apart (`out_0.png`, `out_1.png`, ...) for looking at motion. Without a song file it uses the demo track.

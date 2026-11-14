@@ -2,6 +2,24 @@
 
 Newest entries first.
 
+## 2026-11-13: six things that were missing
+
+A brainstorm produced six gaps, and this pass fills them.
+
+**Calibration by ear.** The audio offset was a number to adjust by hand. Now a tick plays and the player taps along. The tick is started by the audio thread itself at an exact sample, because a tick started from the game loop would carry the jitter of the frames, which is the size of the thing being measured. Tested by tapping 45 ms late on purpose: the game measured +45.5 ms.
+
+**A guided first walk.** One part per key, then all together, then long notes, over the built-in track. The part that mattered was "the music waits for you": rather than stopping the song, a part that goes mostly unanswered is rewound and played again. That needed a seek in the middle of a song, which had never been exercised; the end-to-end run that ignores the first part shows the timing after the seek is as tight as before it (0.4 ms).
+
+**Long notes and breathers.** Charts were all single taps. The analysis now turns notes over sustained sound into long ones and thins what they overlap, and opens a gap in stretches that never rest. On the demo track that is five long notes and 17 fewer taps on Playful. In the game they are all yarn with a thread to reel in, and they cannot be failed: letting go early only forgoes a bonus.
+
+**Daily goals.** Three a day, chosen from the date. The first version did not count the places walked through, because the day's numbers were only set up when the menu was drawn; the end-to-end run, which never shows the menu, caught it.
+
+**The cat's room.** Something for fish to go to after the wardrobe: seven spots, 21 things to buy, 4210 fish in all. The first render showed an empty purple screen: the room skipped the call that clears the depth buffer, so everything failed the depth test against the previous frame. The bed you start with is a cardboard box.
+
+**Getting it, and other inputs.** GitHub Actions builds every push on Windows and Linux and publishes a release on a version tag, so nobody needs a compiler to try it. A gamepad now works for play and menus. The Linux build is honest about being experimental: it shares the game code but has no timestamped key input. Both builds compiled and passed the self-test on the first automatic run; on Linux that is all that has been checked.
+
+**Not verified:** the gamepad (no pad here to press), and as always, how any of this feels to a person.
+
 ## 2026-11-13: fish and levels
 
 The previous entry measured that the unlock conditions went by too fast, and the entry before it said a cozy game should not have an economy. The second opinion lost: unlocking by one-off conditions gave no reason to come back to a song, and what was wanted is a game that rewards playing again and again.

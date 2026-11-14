@@ -27,6 +27,16 @@ The cat walks by itself. Things appear on the path in time with the music, and e
 
 A soft spot of light just ahead of the cat marks where each thing should be answered. The arrow keys work too (left, down, up, right). `Esc` pauses, `F11` toggles fullscreen.
 
+**Long yarn.** Now and then, where the music holds a sound, a ball of yarn comes with a thread trailing behind it. Bat it with `F` and keep the key down while the cat reels the thread in. Holding to the end is a bonus; letting go early costs nothing but that bonus. Stretches of music that never let up also get a short breather.
+
+**New here?** *How to play* at the top of the song shelf is a guided walk: one part for each key, then all four together, then long yarn, with a line of advice on screen. If a part goes by mostly unanswered it is simply played again. Finishing it the first time pays 50 fish.
+
+**Gamepad.** The first connected pad works alongside the keyboard: d-pad left and right are hop and bat, the left and right face buttons are swat and ring (the other d-pad and face buttons double them), and Start pauses. In menus the d-pad moves, the bottom face button accepts and the right one goes back.
+
+| The guided walk | Long yarn |
+| --- | --- |
+| ![The guided walk](docs/img/lesson.png) | ![Long yarn](docs/img/long-note.png) |
+
 ### Streaks
 
 Every hit in a row makes the walk happier, and a miss calms it back down:
@@ -72,11 +82,25 @@ Nothing is random and nothing costs real money. Watch mode earns nothing. The re
 | --- | --- | --- |
 | ![Flower crown](docs/img/wardrobe-crown.png) | ![Beanie, scarf and balloon](docs/img/wardrobe-balloon.png) | ![Straw hat, scarf and backpack](docs/img/wardrobe-backpack.png) |
 
+### Today's goals
+
+Three small goals a day, on the main menu: finish a couple of walks, land so many purrfect hits, reach a streak, pass through a certain place, and so on. They are picked from the date, so they are the same all day and need no connection. Each pays fish once, and all three together pay 50 more.
+
+### The cat's room
+
+**Home** (from the main menu, or `H`) is a little room with seven spots: walls, rug, bed, plant, lamp, toys and something for the wall. Each has four choices; the first is free (the bed starts as a cardboard box, which every cat prefers anyway) and the rest are bought with fish, from 70 for a little cactus to 500 for the cat tree. Furnishing everything takes 4210 fish, so there is always something to save up for after the wardrobe is full. As in the wardrobe, selecting something you do not own shows it in the room first. The window shows the same sky as outside.
+
+![The cat's room](docs/img/home.png)
+
 ### Settings
 
 **Settings** (from the main menu, the song screen, or `S`) has four tabs: **Sound** (music volume, effects volume, audio offset), **Game** (walking speed, key hints, how much the camera and screen effects move: still, gentle or full), **Display** (fullscreen, frame rate: 60, 120 or as fast as the display) and **Progress** (your lifetime numbers, and a reset).
 
 ![Settings](docs/img/settings.png)
+
+**Calibrate by ear** (Settings, Sound) sets the audio offset for you: a steady tick plays, you tap `D`, `F`, `J` or `K` along with it sixteen times, and the game measures how late your taps land. Do it once for each pair of headphones or speakers; Bluetooth usually needs it.
+
+![Audio calibration](docs/img/calibrate.png)
 
 ### Camera and impact
 
@@ -139,17 +163,27 @@ Drop an audio file on the window, use **Open a song**, or pass the file on the c
 
 There is also a built-in demo track, synthesized at startup, so the game is playable without any file.
 
-## Building (Windows)
+## Getting it
 
-You need Visual Studio 2022 (or the Build Tools) with the "Desktop development with C++" workload.
+Every push is built automatically by GitHub Actions; the Windows build of any commit can be downloaded from its run under the repository's **Actions** tab (`oniria-windows-x64`). Pushing a tag such as `v0.1.0` publishes a release with the same zip attached. It is one executable of about 1 MB, with nothing to install.
+
+## Building
+
+**Windows.** You need Visual Studio 2022 (or the Build Tools) with the "Desktop development with C++" workload.
 
 ```bat
 build.bat
 ```
 
-The first run downloads the prebuilt raylib 6.2 release into `third_party/` (checked against a pinned SHA-256) and then compiles `build\oniria.exe`, a single executable of about 1 MB with no other files to ship.
+The first run downloads the prebuilt raylib 6.2 release into `third_party/` (checked against a pinned SHA-256) and then compiles `build\oniria.exe`.
 
-Other platforms are not set up yet. The game code is portable; `src/platform_win.cpp` holds the Windows-only parts (file dialog, low-latency keyboard) next to stubs for everything else.
+**Linux (experimental).** With `g++`, `curl` and the X11 and OpenGL development packages installed:
+
+```sh
+sh build.sh
+```
+
+All the game code is shared, but the timestamped keyboard input and the file dialog exist only on Windows (`src/platform_win.cpp` holds them next to plain fallbacks). On Linux keys are read once a frame, and songs are opened by dropping a file on the window or passing its path on the command line.
 
 ## How it works
 
@@ -180,9 +214,19 @@ The long version is in [docs/how-it-works.md](docs/how-it-works.md), and the sto
   | Saving | best score, library entry and lifetime progress written to disk and read back by the next run |
   | Fish and levels | a later run with the economy in place: the walk paid 41 fish and 96 experience, reached level 2 and its reward, then the test opened the wardrobe with real keys, tried a hat on and bought it (171 fish to 91); all of it was on disk afterwards |
 
+- **What was added since**, each with its own end-to-end run (real key presses, real audio thread, volume at zero):
+
+  | | |
+  | --- | --- |
+  | Calibration | taps sent 45 ms after each tick on purpose were measured as +45.5 ms and the game suggested +45 |
+  | Guided walk | the first part was ignored on purpose and came round again; then everything was answered; the first-time 50 fish were paid once |
+  | Today's goals | a walk that earned an A completed "earn an A or an S" and was paid its 50 fish; the day's numbers were on disk afterwards |
+  | The cat's room | opened with `H`, showed a rug that was not owned, bought it with Enter (411 fish to 321), and it was placed and saved |
+  | Long yarn | of five long notes in a walk, the three the test held to the end paid their bonus and the two it let go of early did not, with no penalty |
+
 - **Sound effects** were measured rather than heard: no clipping, no DC offset, attacks of 3 to 13 ms (no clicks), and practically no energy above 4 kHz.
 
-Still not verified, because it needs a person: how the timing *feels* (injected keys skip the keyboard itself, and the delay between the audio callback and the speakers cannot be measured from inside the program, which is what the audio offset setting is for), whether the sounds are pleasant, how well the charts fit music other than the two test tracks, and whether the prices and the level curve feel right.
+Still not verified, because it needs a person: how the timing *feels* (injected keys skip the keyboard itself, and the delay between the audio callback and the speakers cannot be measured from inside the program, which is what the audio offset setting is for), whether the sounds are pleasant, how well the charts fit music other than the two test tracks, and whether the prices and the level curve feel right. **Gamepad support has not been tried with a real pad**; it is written against raylib's standard mapping and nothing more. The automatic builds pass on both Windows and Linux, including the analysis self-test, but the Linux build has only been compiled and self-tested there: nobody has opened its window or played it.
 
 ## Project layout
 
@@ -191,6 +235,8 @@ src/main.cpp          game loop, renderer, UI
 src/analysis.cpp      onset detection, chart generation, demo track
 src/sfx.cpp           synthesized sound effects
 src/platform_win.cpp  file dialog, raw keyboard input
+build.bat, build.sh   Windows and Linux builds
+.github/workflows/    automatic builds and releases
 scripts/              dependency download
 docs/                 design notes and devlog
 ```
