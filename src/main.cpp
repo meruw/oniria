@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1670,6 +1671,90 @@ static int UnlockedCount()
     return n;
 }
 
+// ---- Today's goals ----
+// Three small goals a day, picked from the date so they are the same all day
+// and need no server. Each pays fish once; all three together pay a bonus.
+
+struct Daily {
+    int day = -1;                // which day the numbers below belong to
+    int walks = 0, perfects = 0, streak = 0, rank = 9, places = 0;
+    float minutes = 0.0f, accuracy = 0.0f;
+    int done = 0;                // bit per goal paid, bit 3 for the bonus
+};
+static Daily gDaily;
+
+enum GoalType { GOAL_WALKS, GOAL_PERFECTS, GOAL_STREAK, GOAL_RANK, GOAL_MINUTES, GOAL_PLACE, GOAL_ACCURACY, GOAL_TYPES };
+struct Goal { int type, amount, fish; };
+static Goal gGoals[3];
+static const int kGoalBonus = 50;
+static int gFakeDay = -1;   // test option: pretend it is this day
+
+static int Today()
+{
+    if (gFakeDay >= 0) return gFakeDay;
+    const time_t now = time(nullptr);
+    const struct tm* local = localtime(&now);
+    return local ? (local->tm_year + 1900) * 372 + local->tm_mon * 31 + local->tm_mday : 0;
+}
+
+// Makes sure the goals and the day's numbers are today's.
+static void EnsureToday()
+{
+    const int day = Today();
+    static int built = -1;
+    if (gDaily.day != day) { gDaily = Daily(); gDaily.day = day; }
+    if (built == day) return;
+    built = day;
+    uint32_t seed = (uint32_t)day * 2654435761u;
+    auto roll = [&](int n) { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return (int)(seed % (uint32_t)n); };
+    int types[GOAL_TYPES];
+    for (int i = 0; i < GOAL_TYPES; i++) types[i] = i;
+    for (int i = 0; i < 3; i++) {   // three different kinds
+        std::swap(types[i], types[i + roll(GOAL_TYPES - i)]);
+        Goal& g = gGoals[i];
+        g.type = types[i];
+        const int size = roll(2);   // a smaller or a larger version
+        switch (g.type) {
+            case GOAL_WALKS:    g.amount = size ? 3 : 2;     g.fish = size ? 60 : 40; break;
+            case GOAL_PERFECTS: g.amount = size ? 300 : 150; g.fish = size ? 70 : 40; break;
+            case GOAL_STREAK:   g.amount = size ? 50 : 30;   g.fish = size ? 60 : 40; break;
+            case GOAL_RANK:     g.amount = 1;                g.fish = 50; break;
+            case GOAL_MINUTES:  g.amount = size ? 10 : 5;    g.fish = size ? 70 : 40; break;
+            case GOAL_PLACE:    g.amount = roll(BIOME_COUNT); g.fish = 40; break;
+            default:            g.amount = 90;               g.fish = 50; break;
+        }
+    }
+}
+
+// How far along a goal is, in the same units as its amount (for a place or a rank: 0 or the amount).
+static int GoalValue(const Goal& g)
+{
+    switch (g.type) {
+        case GOAL_WALKS:    return gDaily.walks;
+        case GOAL_PERFECTS: return gDaily.perfects;
+        case GOAL_STREAK:   return gDaily.streak;
+        case GOAL_RANK:     return gDaily.rank <= 1 ? g.amount : 0;
+        case GOAL_MINUTES:  return (int)gDaily.minutes;
+        case GOAL_PLACE:    return ((gDaily.places >> g.amount) & 1) ? 1 : 0;
+        default:            return (int)(gDaily.accuracy * 100.0f + 0.001f);
+    }
+}
+static bool GoalMet(const Goal& g) { return g.type == GOAL_PLACE ? GoalValue(g) == 1 : GoalValue(g) >= g.amount; }
+
+static const char* GoalText(const Goal& g)
+{
+    const int v = std::min(GoalValue(g), g.amount);
+    switch (g.type) {
+        case GOAL_WALKS:    return TextFormat("Finish %d walks  %d/%d", g.amount, v, g.amount);
+        case GOAL_PERFECTS: return TextFormat("Land %d purrfect hits  %d/%d", g.amount, v, g.amount);
+        case GOAL_STREAK:   return TextFormat("Reach a streak of %d  (best %d)", g.amount, v);
+        case GOAL_RANK:     return "Earn an A or an S";
+        case GOAL_MINUTES:  return TextFormat("Walk for %d minutes  %d/%d", g.amount, v, g.amount);
+        case GOAL_PLACE:    return TextFormat("Pass through the %s", kBiomeName[g.amount]);
+        default:            return TextFormat("Finish a walk at %d%% or better", g.amount);
+    }
+}
+
 static std::string ProgressPath() { return std::string(GetApplicationDirectory()) + "oniria.save"; }
 
 static void LoadProgress()
@@ -1690,6 +1775,15 @@ static void LoadProgress()
         else if (!strcmp(key, "xp")) gProgress.xp = std::max(0, (int)v);
         else if (!strcmp(key, "owned")) gProgress.owned = (unsigned)v;
         else if (!strcmp(key, "guided")) gProgress.guided = (int)v;
+        else if (!strcmp(key, "day")) gDaily.day = (int)v;
+        else if (!strcmp(key, "day_walks")) gDaily.walks = (int)v;
+        else if (!strcmp(key, "day_perfects")) gDaily.perfects = (int)v;
+        else if (!strcmp(key, "day_streak")) gDaily.streak = (int)v;
+        else if (!strcmp(key, "day_rank")) gDaily.rank = (int)v;
+        else if (!strcmp(key, "day_places")) gDaily.places = (int)v;
+        else if (!strcmp(key, "day_minutes")) gDaily.minutes = (float)v;
+        else if (!strcmp(key, "day_accuracy")) gDaily.accuracy = (float)v;
+        else if (!strcmp(key, "day_done")) gDaily.done = (int)v;
         else if (!strcmp(key, "known")) gProgress.known = (unsigned)v;
     }
     fclose(f);
@@ -1703,6 +1797,8 @@ static void SaveProgress()
     fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nfish=%d\nxp=%d\nowned=%u\nknown=%u\nguided=%d\n",
             gProgress.songs, gProgress.perfects, gProgress.bestStreak, gProgress.bestRank, gProgress.fullCombos,
             gProgress.places, gProgress.minutes, gProgress.fish, gProgress.xp, gProgress.owned, gProgress.known, gProgress.guided);
+    fprintf(f, "day=%d\nday_walks=%d\nday_perfects=%d\nday_streak=%d\nday_rank=%d\nday_places=%d\nday_minutes=%.2f\nday_accuracy=%.4f\nday_done=%d\n",
+            gDaily.day, gDaily.walks, gDaily.perfects, gDaily.streak, gDaily.rank, gDaily.places, gDaily.minutes, gDaily.accuracy, gDaily.done);
     fclose(f);
 }
 
@@ -1723,6 +1819,7 @@ struct Earnings {
     bool counted = false;                    // false in watch mode
     int fish = 0, xp = 0, levelFish = 0;     // levelFish: paid on top for the levels reached
     int lessonFish = 0;                      // part of `fish`: the one-time thank-you for finishing the guided walk
+    int goalFish = 0, goals = 0, lastGoal = -1;   // part of `fish`: today's goals this walk completed, and how many
     int xpBefore = 0, levelBefore = 1, levelAfter = 1;
     float at = 0.0f;                         // when the results appeared, for the counting-up
 };
@@ -2006,6 +2103,7 @@ static void StartGame()
     gNoteWhen.assign(n, 0.0f);
     gNoteAction.resize(n);
     for (size_t i = 0; i < n; i++) gNoteAction[i] = gTutorial ? gChart->lane[i] : (uint8_t)kLaneAction[gCfg.diff][gChart->lane[i]];
+    EnsureToday();   // so the places this walk passes count for today's goals
     memset(gTutorialTries, 0, sizeof(gTutorialTries));
     gTutorialPart = 0;
     gTutorialAgainUntil = -1.0;
@@ -2277,6 +2375,24 @@ static void FinishGame()
         gEarn.counted = true;
         gEarn.xp = 10 + (int)lroundf(minutes * 100.0f * acc * kDiffPay[gCfg.diff]);
         gEarn.fish = 5 + (int)lroundf(minutes * 30.0f * acc * acc * kDiffPay[gCfg.diff]) + kRankFish[RankOf(acc)] + (clean ? 15 : 0) + (gNewBest ? 5 : 0);
+        // Today's goals.
+        EnsureToday();
+        gDaily.walks++;
+        gDaily.perfects += gCount[J_PERFECT];
+        gDaily.streak = std::max(gDaily.streak, gMaxCombo);
+        gDaily.rank = std::min(gDaily.rank, RankOf(acc));
+        gDaily.minutes += minutes;
+        gDaily.accuracy = std::max(gDaily.accuracy, acc);
+        for (int i = 0; i < 3; i++) {
+            if (((gDaily.done >> i) & 1) || !GoalMet(gGoals[i])) continue;
+            gDaily.done |= 1 << i;
+            gEarn.goalFish += gGoals[i].fish;
+            gEarn.goals++;
+            gEarn.lastGoal = i;
+        }
+        if ((gDaily.done & 7) == 7 && !(gDaily.done & 8)) { gDaily.done |= 8; gEarn.goalFish += kGoalBonus; }
+        gEarn.fish += gEarn.goalFish;
+
         if (gTutorial && !gProgress.guided) {
             gProgress.guided = 1;
             gEarn.lessonFish = 50;
@@ -2327,7 +2443,10 @@ static void UpdatePlaying(double t)
         gHead++;
     }
     while (gTail < total && gChart->time[gTail] < t - 3.5) gTail++;
-    if (!gCfg.watch || gSimCounts) gProgress.places |= 1 << BiomeNear(gScene.worldX);   // remember where the walk has been
+    if (!gCfg.watch || gSimCounts) {   // remember where the walk has been
+        gProgress.places |= 1 << BiomeNear(gScene.worldX);
+        gDaily.places |= 1 << BiomeNear(gScene.worldX);
+    }
     if (gTutorial && !gCfg.watch && gTutorialPart < kTutorialParts && t >= TutorialPartStart(gTutorialPart + 1)) {
         // The lesson waits for the player: a part where fewer than half the things were answered is
         // played again, twice at most, before moving on.
@@ -3687,6 +3806,25 @@ static void DrawMenu()
         Text(msg.c_str(), leftCx, 62 + titleSize, 10, kCoralLine, 1, false);
     }
 
+    {   // Today's goals.
+        EnsureToday();
+        const int w = 232, x = leftCx - w / 2, y = 56 + titleSize + (gError.empty() ? 0 : 22);
+        Card(x, y, w, 58, Fade(kPaper, 0.93f), kLine);
+        Text("Today", x + 8, y + 4, 10, kCocoaSoft, 0, false);
+        if ((gDaily.done & 8) != 0) Text("all done, see you tomorrow", x + w - 8, y + 4, 10, kCocoaSoft, 2, false);
+        else { Text("all three:", x + w - 44, y + 4, 10, kCocoaSoft, 2, false); FishAmount(kGoalBonus, x + w - 6, y + 4, kCocoaSoft, true); }
+        for (int i = 0; i < 3; i++) {
+            const Goal& g = gGoals[i];
+            const bool done = (gDaily.done >> i) & 1;
+            const int ly = y + 17 + i * 13;
+            if (done) Paw2((float)x + 11, (float)ly + 5, 4.0f, kCoral);
+            else Poly2((float)x + 11, (float)ly + 5, 2.5f, 2.5f, 8, 0, Fade(kLine, 0.9f));
+            Text(GoalText(g), x + 20, ly, 10, done ? kCocoaSoft : kCocoa, 0, false);
+            if (done) Text("done", x + w - 8, ly, 10, kCocoaSoft, 2, false);
+            else FishAmount(g.fish, x + w - 6, ly, kCocoa, true);
+        }
+    }
+
     // Dress the cat, or change how the game behaves.
     const int by0 = gVH - 62;
     {   // Level and fish, at a glance.
@@ -4064,6 +4202,14 @@ static void DrawResults()
                 if (gNewUnlocks.size() > 1) line += TextFormat(" +%d", (int)gNewUnlocks.size() - 1);
             }
             line = Fit(line, 10, pw - 62);
+            const int w = MeasureText(line.c_str(), 10) + 34;
+            Card(cx - w / 2, top + 212, w, 20, kPeach, kPeachLine, false);
+            Paw2((float)(cx - w / 2 + 12), (float)top + 223, 4.5f, kCoral);
+            Text(line.c_str(), cx + 8, top + 217, 10, kCocoa, 1, false);
+        } else if (gEarn.goals > 0 && gEarn.levelAfter == gEarn.levelBefore) {
+            const bool all = (gDaily.done & 8) != 0;
+            std::string line = all ? TextFormat("all of today's goals done!  +%d fish", gEarn.goalFish)
+                                   : TextFormat(gEarn.goals > 1 ? "%d goals done  +%d fish" : "goal done  +%d fish", gEarn.goals > 1 ? gEarn.goals : gEarn.goalFish, gEarn.goalFish);
             const int w = MeasureText(line.c_str(), 10) + 34;
             Card(cx - w / 2, top + 212, w, 20, kPeach, kPeachLine, false);
             Paw2((float)(cx - w / 2 + 12), (float)top + 223, 4.5f, kCoral);
@@ -4637,7 +4783,7 @@ int main(int argc, char** argv)
     double shotAt = 12.0;
     int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
     int shotFish = -1, shotXp = -1;
-    bool robotCalibrate = false, robotLesson = false;
+    bool robotCalibrate = false, robotLesson = false, shotToday = false;
     const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
@@ -4657,6 +4803,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--fish") && i + 1 < argc) shotFish = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--xp") && i + 1 < argc) shotXp = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sel") && i + 1 < argc) gWardrobeSel = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--day") && i + 1 < argc) gFakeDay = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--today")) shotToday = true;
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
         else if (!strcmp(argv[i], "--calibrate")) robotCalibrate = true;
@@ -4702,6 +4850,11 @@ int main(int argc, char** argv)
         if (shotScenery >= 0) gCfg.scenery = std::clamp(shotScenery, 0, (int)BIOME_COUNT);
         gKeepSettings = true;   // screenshots never write the player's settings
         if (shotCat >= 0) gCfg.cat = shotCat;
+        if (shotToday) {   // a day half done, for pictures
+            EnsureToday();
+            gDaily.walks = 1; gDaily.perfects = 212; gDaily.streak = 44; gDaily.minutes = 6.5f; gDaily.rank = 1; gDaily.accuracy = 0.93f; gDaily.places = 5;
+            for (int i = 0; i < 3; i++) if (GoalMet(gGoals[i])) gDaily.done |= 1 << i;
+        }
         if (shotFish >= 0) gProgress.fish = shotFish;
         if (shotXp >= 0) gProgress.xp = shotXp;
         // Screenshots never touch the real library; the menu gets a sample shelf instead.
@@ -4875,6 +5028,10 @@ int main(int argc, char** argv)
                 fprintf(gLog, "\npaid: %d fish and %d xp for the walk, %d fish for levels reached (level %d -> %d)", gEarn.fish, gEarn.xp, gEarn.levelFish,
                         gEarn.levelBefore, gEarn.levelAfter);
                 fprintf(gLog, "\nnow: level %d, %d xp, %d fish", LevelOf(gProgress.xp), gProgress.xp, gProgress.fish);
+                EnsureToday();
+                fprintf(gLog, "\ntoday (day %d):", gDaily.day);
+                for (int i = 0; i < 3; i++) fprintf(gLog, "  [%s: %s, %d fish]", GoalText(gGoals[i]), (gDaily.done >> i) & 1 ? "done" : "open", gGoals[i].fish);
+                fprintf(gLog, "  this walk finished %d goal(s) for %d fish; bonus paid: %s", gEarn.goals, gEarn.goalFish, gDaily.done & 8 ? "yes" : "no");
                 if (gTutorial) fprintf(gLog, "\nlesson: parts repeated %d %d %d %d %d times; first-time thank-you %d fish; finished flag %d", gTutorialTries[0], gTutorialTries[1],
                                        gTutorialTries[2], gTutorialTries[3], gTutorialTries[4], gEarn.lessonFish, gProgress.guided);
                 fprintf(gLog, "\nprogress now: %d song(s), %d purrfect, best streak %d, best rank %d, places mask %d\n", gProgress.songs, gProgress.perfects,
