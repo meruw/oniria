@@ -2,6 +2,16 @@
 
 Newest entries first.
 
+## 2026-11-13: kittens, a wardrobe and a settings screen
+
+**Cuter cats.** The cats were recognisable but not cute. What changed the read most was not detail but proportion and angle: a head nearly as big as the body, eyes much larger and set low and wide, a short round body, stubby legs with big paws, and the head turned to a three-quarter view so both eyes always face the player. Then the small things: two highlights in each eye, rosy cheeks, a mouth, whiskers, cheek fur. The first cheeks were boxes and stuck out like bricks in the close-up; they are flattened blobs set into the cheek now. The face is also lit flatter than the body so it never goes grey in shade.
+
+**A wardrobe.** Hats, things for the neck and things for the back, 21 in all, plus four of the seven cats, are unlocked by playing. Each has one plain condition (songs finished, perfect hits, best streak, a rank, a place visited, time walked) and shows its progress. There is no shop and no randomness on purpose: a cozy game should not have an economy to manage. The wardrobe moves the camera in close, the cat hops when it changes clothes, and the results screen says what a walk unlocked or what is nearest.
+
+**A settings screen.** Four tabs on cream paper: sound, game, display, progress. It took over the settings that had piled up on the song screen, which is now just difficulty, scenery, watch mode and Play. New settings: music volume, a frame rate choice (60 is offered as the lightest), and how much the camera and screen effects move, for anyone who finds the motion too much.
+
+**Not checked by a person yet:** everything here in real time, and whether the unlock pace feels right. The numbers were chosen so the first few items come within a song or two; that is a guess.
+
 ## 2026-11-13: fifteen places instead of five
 
 The five places each looked the same every time. Now each has three variations with their own landmarks: flower fields with a windmill, farmland, a riverside; a garden, a stream with red bridges, a lantern festival; deep woods, a pumpkin patch, a harvest village; a village, a frozen river, a pine forest under the aurora; a beach, a harbour with a lighthouse, a rocky cove.

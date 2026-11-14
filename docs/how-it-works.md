@@ -106,6 +106,14 @@ Body, head, legs and tail are lofts: a row of elliptical rings skinned into a cl
 
 The parts are modelled around their own joints so they can be posed: the head around the neck, each leg as a thigh and a shin with a paw, the tail as five tapering segments. Walking moves diagonal pairs of legs together and lifts each paw as its leg swings forward; a wave runs down the tail from base to tip. The cat is drawn with its shading pulled partly towards its true colours, and the scene's light comes from ahead of it, so its face is never in shadow.
 
+## Progress and unlocks
+
+There is no currency and no list of unlocked things on disk. `oniria.save` holds eight lifetime numbers (songs finished, perfect hits, best streak, best rank, songs without a miss, minutes walked, a bit per place visited, a bit per item already seen), and whether an item is unlocked is computed from them each time it is asked. Every item has exactly one condition from a small set, so the table in the code is the whole design, and changing a requirement cannot corrupt anyone's save.
+
+When a song ends, the unlock state of every item is taken before and after adding that song's numbers; the difference is what the results screen announces. Watch mode never counts.
+
+What the cat wears is three more shapes built by `BuildCat`: one in head space (so hats follow the head as it turns and nods), and two in body space. Wings and the balloon are posed separately so they can flutter and sway.
+
 ## Staying light
 
 - **Frame pacing.** The game sleeps on a high-resolution waitable timer until the next frame is due: 120 frames a second while playing, 60 in menus, 30 in the background, and no drawing at all while minimized. V-sync is still requested, but it is not relied on: a driver can switch it off, and the first measurement of the menu showed the loop spinning more than a whole core for exactly that reason. raylib's own limiter was avoided because it busy-waits part of every frame.
@@ -139,4 +147,4 @@ Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results|wardrobe|settings] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n] [--tab 0..3] [--unlock-all] [--count] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.

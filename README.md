@@ -37,11 +37,32 @@ Every hit in a row makes the walk happier, and a miss calms it back down:
 
 ### Cats
 
-Seven cats share the walk: Mango the orange tabby, Domino the tuxedo, Mochi the calico, Luna the siamese, Pebble the british blue, Cloud the fluffy white one and Midnight the black cat. They differ in coat pattern, colours, eye colour, collar and a few proportions. Pick one with the arrows under the title in the main menu (or the left and right keys); the choice is remembered.
+Seven cats share the walk: Mango the orange tabby, Domino the tuxedo, Mochi the calico, Luna the siamese, Pebble the british blue, Cloud the fluffy white one and Midnight the black cat. They differ in coat pattern, colours, eye colour and a few proportions, and all of them are built like kittens: a big head, big low-set eyes, rosy cheeks, whiskers, a short body and stubby legs with round paws.
 
-| Mango | Domino | Luna | Cloud |
-| --- | --- | --- | --- |
-| ![Mango](docs/img/cat-mango.png) | ![Domino](docs/img/cat-domino.png) | ![Luna](docs/img/cat-luna.png) | ![Cloud](docs/img/cat-cloud.png) |
+### Wardrobe and unlocks
+
+The **Wardrobe** (from the main menu, or `C`) brings the camera in close and lets you choose the cat and what it wears: something on its head, around its neck and on its back. You start with three cats, a bow and a bell collar. Everything else is earned by playing, and each item says what it is waiting for and how far along you are:
+
+| Earned by | Unlocks |
+| --- | --- |
+| Finishing songs | Bow tie (1), Luna (3), Balloon (5), Midnight (6), Headphones (10) |
+| Purrfect hits, in total | Flower crown (50), Scarf (150), Pebble (300) |
+| Your best streak | Party hat (25), Bandana (40), Cloud (60), Wings (100) |
+| Ranks | Top hat (an A), Crown (an S), Halo (a song with no misses) |
+| Places walked through | Straw hat (seaside), Beanie (snowy village), Witch hat (autumn woods), Flower garland (blossom garden) |
+| Time spent walking | Backpack (10 minutes) |
+
+Nothing is bought and nothing is random. Watch mode does not count. The results screen tells you what a walk unlocked, or what is next within reach.
+
+| Flower crown | Beanie, scarf and balloon |
+| --- | --- |
+| ![Flower crown](docs/img/wardrobe-crown.png) | ![Beanie, scarf and balloon](docs/img/wardrobe-balloon.png) |
+
+### Settings
+
+**Settings** (from the main menu, the song screen, or `S`) has four tabs: **Sound** (music volume, effects volume, audio offset), **Game** (walking speed, key hints, how much the camera and screen effects move: still, gentle or full), **Display** (fullscreen, frame rate: 60, 120 or as fast as the display) and **Progress** (your lifetime numbers, and a reset).
+
+![Settings](docs/img/settings.png)
 
 ### Camera and impact
 
@@ -79,11 +100,7 @@ Each action has its own soft instrument (marimba for logs, a round "bloop" for y
 
 There are three difficulties. **Cozy** only uses hop and bat, **Playful** adds butterflies, and **Zoomies** uses all four and sometimes asks for two at once.
 
-Other options on the song screen:
-
-- **Walking speed**: how fast the world scrolls, which is also how much warning you get.
-- **Audio offset**: raise it if things reach the cat before you hear the beat (Bluetooth headphones usually need this).
-- **Watch mode**: the cat plays by itself, if you just want to look and listen.
+The song screen also has **Watch mode**, where the cat plays by itself if you just want to look and listen, and the scenery choice. Walking speed and audio offset live in Settings; raise the offset if things reach the cat before you hear the beat (Bluetooth headphones usually need this).
 - **Key hints**: shows the key above each upcoming object.
 
 ## How light it is
@@ -92,11 +109,11 @@ Measured on Windows with the release build:
 
 | | |
 | --- | --- |
-| Executable | 1.1 MB, no other files to ship |
-| Memory | about 65 MB with the menu open, plus roughly 10 MB per minute of the loaded song |
-| CPU, window open in the background | about 6% of one core (half of it is the audio device thread) |
+| Executable | 1.2 MB, no other files to ship |
+| Memory | 65 to 75 MB with the menu open, plus roughly 10 MB per minute of the loaded song |
+| CPU, menu open | 6 to 10% of one core (about 3% of that is the audio device thread) |
 | CPU, minimized | about 5% of one core; nothing is drawn |
-| Frame cost | about 1 ms of CPU per frame; the 3D scene is drawn into a 640x360 canvas |
+| Frame cost | about 1.4 ms of CPU per frame; the 3D scene is drawn into a 640x360 canvas |
 
 Frames are capped at 120 per second while playing, 60 in menus and 30 when the window is not focused. Songs are analyzed in about a tenth of a second per minute of music.
 

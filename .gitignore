@@ -11,6 +11,7 @@
 # Local game settings, song library and test screenshots
 oniria.cfg
 oniria.songs
+oniria.save
 /shots/
 
 # Editors and tools

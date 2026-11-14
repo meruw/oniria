@@ -56,7 +56,7 @@ static const int kLaneAction[DIFF_COUNT][4] = {
 static const int   kActionCount[DIFF_COUNT] = { 2, 3, 4 };
 static const char* kDiffName[DIFF_COUNT] = { "Cozy", "Playful", "Zoomies" };
 
-enum State { ST_MENU, ST_LOADING, ST_READY, ST_PLAYING, ST_PAUSED, ST_COUNTDOWN, ST_RESULTS };
+enum State { ST_MENU, ST_LOADING, ST_READY, ST_PLAYING, ST_PAUSED, ST_COUNTDOWN, ST_RESULTS, ST_WARDROBE, ST_SETTINGS };
 enum Judgement { J_PERFECT, J_GREAT, J_GOOD, J_MISS };
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,12 @@ struct Settings {
     int   sfx      = 7;       // sound effects volume, 0..10
     int   scenery  = 0;       // 0 = a journey through every place, 1.. = stay in one
     int   cat      = 0;       // which cat is walking
+    int   hat      = 0;       // what it wears: 0 is nothing in each slot
+    int   neck     = 1;       // starts with the bell collar
+    int   back     = 0;
+    int   music    = 10;      // music volume, 0..10
+    int   fps      = 1;       // 0: 60, 1: up to 120, 2: as fast as the display
+    int   motion   = 2;       // camera and screen effects. 0: still, 1: gentle, 2: full
 };
 static Settings gCfg;
 
@@ -92,6 +98,12 @@ static void LoadSettings()
         else if (!strcmp(key, "sfx")) gCfg.sfx = std::clamp((int)v, 0, 10);
         else if (!strcmp(key, "scenery")) gCfg.scenery = std::clamp((int)v, 0, 5);
         else if (!strcmp(key, "cat")) gCfg.cat = std::max(0, (int)v);
+        else if (!strcmp(key, "hat")) gCfg.hat = std::max(0, (int)v);
+        else if (!strcmp(key, "neck")) gCfg.neck = std::max(0, (int)v);
+        else if (!strcmp(key, "back")) gCfg.back = std::max(0, (int)v);
+        else if (!strcmp(key, "music")) gCfg.music = std::clamp((int)v, 0, 10);
+        else if (!strcmp(key, "fps")) gCfg.fps = std::clamp((int)v, 0, 2);
+        else if (!strcmp(key, "motion")) gCfg.motion = std::clamp((int)v, 0, 2);
     }
     fclose(f);
 }
@@ -102,6 +114,7 @@ static void SaveSettings()
     if (!f) return;
     fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\nscenery=%d\ncat=%d\n",
             gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx, gCfg.scenery, gCfg.cat);
+    fprintf(f, "hat=%d\nneck=%d\nback=%d\nmusic=%d\nfps=%d\nmotion=%d\n", gCfg.hat, gCfg.neck, gCfg.back, gCfg.music, gCfg.fps, gCfg.motion);
     fclose(f);
 }
 
@@ -209,6 +222,7 @@ struct Player {
     std::mutex mutex;           // guards pcm/frames/pos against song swaps and seeks
     std::atomic<int64_t>  pos{ 0 };
     std::atomic<bool>     playing{ false };
+    std::atomic<float>    gain{ 1.0f };      // music volume
     std::atomic<uint32_t> seq{ 0 };
     std::atomic<int64_t>  stampPos{ 0 };
     std::atomic<double>   stampTime{ 0.0 };
@@ -276,7 +290,7 @@ static void FeedAudio(void* buffer, unsigned int frames)
         StampLocked(pos);
         const int16_t* data = gPlayer.pcm.data;
         const int64_t total = gPlayer.frames;
-        const float k = 0.9f / 32768.0f;   // a little headroom for the effects on top
+        const float k = 0.9f / 32768.0f * gPlayer.gain.load(std::memory_order_relaxed);   // a little headroom for the effects on top
         for (unsigned int i = 0; i < frames; i++) {
             const int64_t f = pos + i;
             if (f >= 0 && f < total) {
@@ -376,6 +390,7 @@ static float gEndJoy = 0.0f;         // mood on the results screen
 static int   gMilestone = 0;
 static float gMilestoneAge = 9.0f;
 static float gHeartTimer = 0.0f, gStarTimer = 0.0f, gBloomMark = 0.0f;
+static float gPreview = 0.0f;         // 0..1: how far the camera has moved in for the wardrobe
 
 // Loading runs on a worker thread so the world keeps moving.
 struct LoadJob {
@@ -433,9 +448,13 @@ struct CameraRig {
 };
 static CameraRig gRig;
 
+// How much the camera and the screen are allowed to move: a setting, for people who prefer it calmer.
+static float MotionScale() { return gCfg.motion >= 2 ? 1.0f : gCfg.motion == 1 ? 0.45f : 0.0f; }
+
 static void KickCamera(float x, float y, float roll, float zoom)
 {
-    gRig.vx += x; gRig.vy += y; gRig.vroll += roll; gRig.vzoom += zoom;
+    const float m = MotionScale();
+    gRig.vx += x * m; gRig.vy += y * m; gRig.vroll += roll * m; gRig.vzoom += zoom * m;
 }
 
 // Flowers that bloom because of how you are playing.
@@ -697,6 +716,7 @@ static void UpdateCanvas()
 // ---------------------------------------------------------------------------
 
 static Shape sCatBody, sCatHead, sCatEyes, sCatThigh[2], sCatShin[2], sCatTail[5];   // [0] front leg, [1] hind leg; rebuilt by BuildCat
+static Shape sCatHat, sCatNeck, sCatBack, sCatWing;                                   // what it is wearing
 static Shape sLog, sYarn, sWing, sButterflyBody, sBellStalk, sBell;
 static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sWindows, sLampPost, sLamp;
 static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sRingUp, sCatBlush;
@@ -1003,30 +1023,33 @@ static const CatKind kCats[] = {
 };
 const int kCatCount = (int)(sizeof(kCats) / sizeof(kCats[0]));
 
-// Builds every part of the cat, facing +x with its feet on y = 0. Head, eyes,
-// legs and tail segments are modelled around their own joints so they can be posed.
+// Builds every part of the cat, facing +x with its feet on y = 0, along with
+// whatever it is wearing. Head, eyes, legs and tail segments are modelled
+// around their own joints so they can be posed. Proportions are deliberately
+// those of a kitten: a big head, big low-set eyes, a short body and stubby legs.
 static void BuildCat(int kind)
 {
     const CatKind& c = kCats[std::clamp(kind, 0, kCatCount - 1)];
     sCatBody.clear(); sCatHead.clear(); sCatEyes.clear(); sCatBlush.clear();
+    sCatHat.clear(); sCatNeck.clear(); sCatBack.clear(); sCatWing.clear();
     for (Shape& s : sCatThigh) s.clear();
     for (Shape& s : sCatShin) s.clear();
     for (Shape& s : sCatTail) s.clear();
 
     const Vector3 X = { 1, 0, 0 }, Y = { 0, 1, 0 }, Z = { 0, 0, 1 };
-    const Vector3 pink = Rgb(250, 160, 170), ink = Rgb(44, 34, 46), white = { 1, 1, 1 };
+    const Vector3 pink = Rgb(250, 160, 170), ink = Rgb(44, 34, 46), white = { 1, 1, 1 }, gold = Rgb(250, 214, 92);
     const Vector3 belly = c.pattern == PAT_SOLID ? Mix(c.base, c.light, 0.45f) : c.light;
     const float w = c.chub;
 
-    // Body: rump, haunches, waist, ribs, chest, neck.
+    // Body: rump, haunches, waist, ribs, chest, neck. Short and round.
     const LoftRing body[7] = {
-        { { -0.50f, 0.52f, 0 }, 0.07f * w, 0.09f },
-        { { -0.40f, 0.52f, 0 }, 0.21f * w, 0.23f },
-        { { -0.22f, 0.51f, 0 }, 0.25f * w, 0.27f },
-        { { -0.02f, 0.50f, 0 }, 0.23f * w, 0.25f },
-        { {  0.17f, 0.52f, 0 }, 0.24f * w, 0.26f },
-        { {  0.32f, 0.56f, 0 }, 0.22f * w, 0.24f },
-        { {  0.44f, 0.63f, 0 }, 0.14f, 0.15f },
+        { { -0.42f, 0.44f, 0 }, 0.07f * w, 0.08f },
+        { { -0.33f, 0.44f, 0 }, 0.22f * w, 0.22f },
+        { { -0.17f, 0.43f, 0 }, 0.26f * w, 0.26f },
+        { {  0.00f, 0.43f, 0 }, 0.25f * w, 0.25f },
+        { {  0.15f, 0.45f, 0 }, 0.25f * w, 0.25f },
+        { {  0.27f, 0.49f, 0 }, 0.22f * w, 0.22f },
+        { {  0.37f, 0.55f, 0 }, 0.15f, 0.15f },
     };
     AddLoft(sCatBody, body, 7, 8, Z, Y, [&](int span, int side, float lift) -> Vector3 {
         const bool top = lift > 0.3f, under = lift < -0.5f;
@@ -1042,23 +1065,19 @@ static void BuildCat(int kind)
             default:         return under ? belly : c.base;
         }
     });
-    // A collar with a little bell.
-    const LoftRing collar[2] = { { { 0.345f, 0.575f, 0 }, 0.205f * w + 0.014f, 0.236f }, { { 0.40f, 0.607f, 0 }, 0.168f * w + 0.014f, 0.198f } };
-    AddLoft(sCatBody, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return c.collar; });
-    AddBlob(sCatBody, { 0.41f, 0.40f, 0 }, { 0.045f, 0.045f, 0.045f }, Rgb(250, 214, 92));
 
-    // Head, around the neck joint: wide cheeks, a short muzzle.
+    // Head, around the neck joint: very round, wide cheeks, a tiny muzzle.
     const float hw = 1.0f + (c.chub - 1.0f) * 0.6f + (c.fluff - 1.0f) * 0.12f;
     const LoftRing head[7] = {
-        { { -0.18f, 0.03f, 0 }, 0.16f, 0.15f },
-        { { -0.06f, 0.04f, 0 }, 0.31f * hw, 0.28f },
-        { {  0.09f, 0.04f, 0 }, 0.37f * hw, 0.32f },
-        { {  0.22f, 0.02f, 0 }, 0.33f * hw, 0.28f },
-        { {  0.31f, -0.01f, 0 }, 0.23f * hw, 0.20f },
-        { {  0.355f, -0.05f, 0 }, 0.15f, 0.115f },
-        { {  0.385f, -0.065f, 0 }, 0.09f, 0.07f },
+        { { -0.19f, 0.03f, 0 }, 0.17f, 0.16f },
+        { { -0.07f, 0.04f, 0 }, 0.32f * hw, 0.29f },
+        { {  0.08f, 0.04f, 0 }, 0.38f * hw, 0.33f },
+        { {  0.21f, 0.02f, 0 }, 0.34f * hw, 0.29f },
+        { {  0.30f, -0.01f, 0 }, 0.24f * hw, 0.21f },
+        { {  0.345f, -0.05f, 0 }, 0.15f, 0.115f },
+        { {  0.375f, -0.065f, 0 }, 0.09f, 0.07f },
     };
-    AddLoft(sCatHead, head, 7, 8, Z, Y, [&](int span, int side, float lift) -> Vector3 {
+    AddLoft(sCatHead, head, 7, 10, Z, Y, [&](int span, int side, float lift) -> Vector3 {
         const bool muzzle = span >= 4, face = span == 3;
         switch (c.pattern) {
             case PAT_TABBY:
@@ -1077,12 +1096,14 @@ static void BuildCat(int kind)
             default:         return muzzle && lift < 0.4f ? belly : c.base;
         }
     });
-    AddBlob(sCatHead, { 0.40f, -0.055f, 0 }, { 0.03f, 0.024f, 0.042f }, c.pattern == PAT_POINT ? Rgb(84, 60, 64) : pink);   // nose
+    AddBlob(sCatHead, { 0.39f, -0.055f, 0 }, { 0.028f, 0.022f, 0.04f }, c.pattern == PAT_POINT ? Rgb(84, 60, 64) : pink);   // nose
+    AddBox(sCatHead, { 0.375f, -0.105f, 0 }, { 0.008f, 0.012f, 0.032f }, ink);                                           // a little mouth
+    const Vector3 whisker = Mix(c.light, white, 0.6f);
     for (int side = -1; side <= 1; side += 2) {
         const float z = (float)side;
         // Ear: a three-sided pyramid with a pink panel on its front face.
-        const Vector3 tip = { -0.02f, 0.30f + 0.17f * c.ear, z * 0.29f * hw };
-        const Vector3 a = { 0.13f, 0.24f, z * 0.12f }, b = { 0.04f, 0.15f, z * 0.37f * hw }, d = { -0.13f, 0.21f, z * 0.24f };
+        const Vector3 tip = { -0.02f, 0.33f + 0.2f * c.ear, z * 0.30f * hw };
+        const Vector3 a = { 0.14f, 0.25f, z * 0.11f }, b = { 0.04f, 0.15f, z * 0.39f * hw }, d = { -0.14f, 0.21f, z * 0.25f };
         const Vector3 centre = Vector3Scale(Vector3Add(Vector3Add(a, b), Vector3Add(d, tip)), 0.25f);
         const Vector3 fur = c.pattern == PAT_POINT || c.pattern == PAT_TABBY ? c.mark : c.pattern == PAT_CALICO ? (side < 0 ? c.mark : c.mark2) : c.base;
         const size_t from = sCatHead.size();
@@ -1090,47 +1111,204 @@ static void BuildCat(int kind)
         sCatHead.push_back({ b, d, tip, fur });
         sCatHead.push_back({ d, a, tip, fur });
         const Vector3 front = Vector3Scale(Vector3Add(Vector3Add(a, b), tip), 1.0f / 3.0f);
-        auto inset = [&](Vector3 p) { return Vector3Add(Vector3Lerp(p, front, 0.32f), Vector3{ 0.014f, 0.004f, 0 }); };
+        auto inset = [&](Vector3 q) { return Vector3Add(Vector3Lerp(q, front, 0.32f), Vector3{ 0.014f, 0.004f, 0 }); };
         sCatHead.push_back({ inset(a), inset(b), inset(tip), pink });
         Orient(sCatHead, from, centre);
-        if (c.fluff > 1.3f) AddBlob(sCatHead, { 0.12f, -0.15f, z * 0.33f * hw }, { 0.11f, 0.09f, 0.09f }, c.light);   // cheek fur
 
-        // Big eyes: iris, pupil and a highlight. Modelled around eye height so they can close.
-        AddBlob(sCatEyes, { 0.285f, 0.0f, z * 0.215f * hw }, { 0.060f, 0.098f, 0.074f }, c.eye);
-        AddBlob(sCatEyes, { 0.318f, 0.0f, z * 0.22f * hw }, { 0.040f, 0.078f, 0.050f }, ink);
-        AddBox(sCatEyes, { 0.356f, 0.04f, z * 0.22f * hw + 0.02f }, { 0.012f, 0.02f, 0.015f }, white);
-        AddBox(sCatBlush, { 0.25f, -0.09f, z * 0.30f * hw }, { 0.03f, 0.034f, 0.05f }, Rgb(255, 150, 165));
+        // Fluffy cheeks and two whiskers a side.
+        AddBlob(sCatHead, { 0.10f, -0.17f, z * 0.33f * hw }, { 0.10f * c.fluff, 0.075f, 0.08f }, c.fluff > 1.3f ? c.light : c.pattern == PAT_POINT ? Mix(c.base, c.mark, 0.4f) : c.base);
+        AddBeam(sCatHead, { 0.30f, -0.07f, z * 0.20f }, { 0.33f, -0.05f, z * 0.46f }, 0.0035f, whisker);
+        AddBeam(sCatHead, { 0.30f, -0.10f, z * 0.20f }, { 0.32f, -0.13f, z * 0.44f }, 0.0035f, whisker);
+
+        // Big eyes set low and wide: iris, pupil and two highlights. Modelled around eye height so they can close.
+        AddBlob(sCatEyes, { 0.270f, 0.0f, z * 0.225f * hw }, { 0.070f, 0.115f, 0.085f }, c.eye);
+        AddBlob(sCatEyes, { 0.308f, 0.0f, z * 0.230f * hw }, { 0.050f, 0.095f, 0.060f }, ink);
+        AddBox(sCatEyes, { 0.356f, 0.05f, z * 0.230f * hw + 0.025f }, { 0.014f, 0.024f, 0.018f }, white);
+        AddBox(sCatEyes, { 0.360f, -0.04f, z * 0.230f * hw - 0.02f }, { 0.008f, 0.012f, 0.010f }, white);
+        AddBlob(sCatBlush, { 0.215f, -0.115f, z * 0.262f * hw }, { 0.05f, 0.042f, 0.05f }, Rgb(255, 150, 165));   // a rosy patch, set into the cheek
     }
 
-    // Legs hang from their joints: a thigh, then a shin ending in a paw.
+    // Legs hang from their joints: a short thigh, then a shin ending in a big round paw.
     const Vector3 thighCol[2] = { c.base, c.pattern == PAT_CALICO ? c.mark2 : c.base };
     const Vector3 shinCol = c.pattern == PAT_TUXEDO || c.pattern == PAT_CALICO ? c.light : c.pattern == PAT_POINT ? c.mark : c.base;
     const Vector3 pawCol = c.pattern == PAT_POINT ? c.mark : c.pattern == PAT_SOLID ? belly : c.light;
-    const LoftRing frontThigh[3] = { { { 0, 0.03f, 0 }, 0.082f, 0.074f }, { { 0, -0.08f, 0 }, 0.074f, 0.068f }, { { 0, -0.17f, 0 }, 0.060f, 0.058f } };
-    const LoftRing hindThigh[3] = { { { 0, 0.05f, 0 }, 0.120f, 0.090f }, { { -0.01f, -0.08f, 0 }, 0.102f, 0.080f }, { { 0, -0.17f, 0 }, 0.064f, 0.060f } };
-    const LoftRing shin[2] = { { { 0, 0.01f, 0 }, 0.060f, 0.057f }, { { 0, -0.11f, 0 }, 0.052f, 0.052f } };
+    const LoftRing frontThigh[3] = { { { 0, 0.03f, 0 }, 0.085f, 0.078f }, { { 0, -0.06f, 0 }, 0.078f, 0.070f }, { { 0, -0.13f, 0 }, 0.066f, 0.062f } };
+    const LoftRing hindThigh[3] = { { { 0, 0.05f, 0 }, 0.125f, 0.095f }, { { -0.01f, -0.06f, 0 }, 0.105f, 0.082f }, { { 0, -0.13f, 0 }, 0.070f, 0.064f } };
+    const LoftRing shin[2] = { { { 0, 0.01f, 0 }, 0.064f, 0.060f }, { { 0, -0.07f, 0 }, 0.058f, 0.056f } };
     for (int leg = 0; leg < 2; leg++) {
         const Vector3 col = thighCol[leg];
         AddLoft(sCatThigh[leg], leg ? hindThigh : frontThigh, 3, 6, X, Z, [&](int span, int, float) -> Vector3 {
             return c.pattern == PAT_TABBY && span == 0 && leg == 1 ? c.mark : col;
         });
         AddLoft(sCatShin[leg], shin, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return shinCol; });
-        AddBlob(sCatShin[leg], { 0.03f, -0.155f, 0 }, { 0.084f, 0.048f, 0.07f }, pawCol);
+        AddBlob(sCatShin[leg], { 0.035f, -0.105f, 0 }, { 0.095f, 0.05f, 0.078f }, pawCol);
     }
 
     // Tail: five tapering segments, each around the joint at its base.
     for (int i = 0; i < 5; i++) {
         auto radius = [&](int k) {
-            const float taper = 0.062f - 0.008f * k;
+            const float taper = 0.07f - 0.008f * k;
             return c.fluff > 1.3f ? taper * (1.0f + 0.9f * sinf(kPi * (k + 0.6f) / 5.6f)) : taper;
         };
-        const LoftRing seg[2] = { { { 0, 0, 0 }, radius(i), radius(i) }, { { 0, 0.21f, 0 }, radius(i + 1), radius(i + 1) } };
+        const LoftRing seg[2] = { { { 0, 0, 0 }, radius(i), radius(i) }, { { 0, 0.19f, 0 }, radius(i + 1), radius(i + 1) } };
         Vector3 col = c.base;
         if (c.pattern == PAT_TABBY) col = (i & 1) ? c.mark : c.base;
         else if (c.pattern == PAT_TUXEDO) col = i == 4 ? c.light : c.base;
         else if (c.pattern == PAT_CALICO) col = (i & 1) ? c.mark2 : c.mark;
         else if (c.pattern == PAT_POINT) col = c.mark;
         AddLoft(sCatTail[i], seg, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return col; });
+    }
+
+    // ---- On the head (head space; the crown of the head is around y = 0.31) ----
+    const Vector3 top = { 0.06f, 0.29f, 0 };
+    static const Vector3 kPetals[4] = { { 1.0f, 0.62f, 0.72f }, { 1.0f, 0.88f, 0.45f }, { 1.0f, 1.0f, 1.0f }, { 0.78f, 0.72f, 1.0f } };
+    switch (gCfg.hat) {
+        case 1: {   // bow, by the near ear
+            const Vector3 ribbon = Rgb(242, 112, 142);
+            AddBlob(sCatHat, { 0.07f, 0.31f, 0.11f }, { 0.045f, 0.075f, 0.085f }, ribbon);
+            AddBlob(sCatHat, { 0.07f, 0.29f, 0.29f }, { 0.045f, 0.075f, 0.085f }, ribbon);
+            AddBlob(sCatHat, { 0.085f, 0.30f, 0.20f }, { 0.045f, 0.045f, 0.04f }, Rgb(214, 86, 118));
+            break;
+        }
+        case 2:     // flower crown
+            for (int i = 0; i < 9; i++) {
+                const float a = 2 * kPi * i / 9;
+                AddBlob(sCatHat, { top.x + cosf(a) * 0.27f, 0.255f - 0.03f * cosf(a), sinf(a) * 0.29f * hw }, { 0.065f, 0.05f, 0.065f }, kPetals[i & 3]);
+                AddBlob(sCatHat, { top.x + cosf(a + 0.35f) * 0.26f, 0.235f - 0.03f * cosf(a), sinf(a + 0.35f) * 0.28f * hw }, { 0.04f, 0.03f, 0.04f }, Rgb(120, 180, 110));
+            }
+            break;
+        case 3: {   // party hat, striped, with a pom on top
+            const size_t from = sCatHat.size();
+            const Vector3 tipAt = { top.x - 0.03f, top.y + 0.40f, 0 };
+            for (int i = 0; i < 8; i++) {
+                const float a0 = 2 * kPi * i / 8, a1 = 2 * kPi * (i + 1) / 8;
+                sCatHat.push_back({ { top.x + cosf(a0) * 0.16f, top.y - 0.02f, sinf(a0) * 0.16f }, { top.x + cosf(a1) * 0.16f, top.y - 0.02f, sinf(a1) * 0.16f }, tipAt,
+                                    (i & 1) ? Rgb(255, 222, 110) : Rgb(120, 200, 236) });
+            }
+            Orient(sCatHat, from, Vector3{ top.x, top.y + 0.1f, 0 });
+            AddBlob(sCatHat, tipAt, { 0.05f, 0.05f, 0.05f }, Rgb(250, 130, 150));
+            break;
+        }
+        case 4: {   // straw hat
+            const Vector3 straw = Rgb(240, 214, 150), strawLight = Rgb(250, 230, 176);
+            AddCylinder(sCatHat, { top.x, top.y - 0.04f, 0 }, 0.46f, 0.03f, 10, straw, strawLight);
+            AddCylinder(sCatHat, { top.x, top.y - 0.02f, 0 }, 0.23f, 0.16f, 8, straw, strawLight);
+            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.238f, 0.045f, 8, Rgb(226, 100, 100), Rgb(226, 100, 100));
+            break;
+        }
+        case 5: {   // beanie
+            const Vector3 wool = Rgb(96, 180, 190), cuff = Rgb(240, 246, 246);
+            AddBlob(sCatHat, { top.x, top.y - 0.07f, 0 }, { 0.35f, 0.27f, 0.37f * hw }, wool);
+            const LoftRing band[2] = { { { top.x, top.y - 0.10f, 0 }, 0.385f * hw, 0.365f }, { { top.x, top.y - 0.02f, 0 }, 0.36f * hw, 0.345f } };
+            AddLoft(sCatHat, band, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return cuff; });
+            AddBlob(sCatHat, { top.x, top.y + 0.22f, 0 }, { 0.075f, 0.075f, 0.075f }, cuff);
+            break;
+        }
+        case 6: {   // witch hat
+            const Vector3 cloth = Rgb(110, 84, 150);
+            AddCylinder(sCatHat, { top.x, top.y - 0.04f, 0 }, 0.44f, 0.03f, 10, cloth, Rgb(128, 100, 170));
+            AddCone(sCatHat, { top.x, top.y - 0.02f, 0 }, 0.24f, 0.58f, 7, cloth);
+            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.245f, 0.055f, 7, Rgb(60, 46, 70), Rgb(60, 46, 70));
+            AddBox(sCatHat, { top.x + 0.24f, top.y + 0.017f, 0 }, { 0.015f, 0.035f, 0.045f }, gold);
+            break;
+        }
+        case 7: {   // top hat
+            const Vector3 felt = Rgb(58, 50, 68);
+            AddCylinder(sCatHat, { top.x, top.y - 0.03f, 0 }, 0.32f, 0.03f, 10, felt, Rgb(74, 66, 86));
+            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.20f, 0.34f, 8, felt, Rgb(74, 66, 86));
+            AddCylinder(sCatHat, { top.x, top.y, 0 }, 0.207f, 0.06f, 8, Rgb(226, 100, 100), Rgb(226, 100, 100));
+            break;
+        }
+        case 8: {   // crown
+            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.20f, 0.10f, 8, gold, Rgb(255, 232, 140));
+            for (int i = 0; i < 6; i++) {
+                const float a = 2 * kPi * (i + 0.5f) / 6;
+                AddCone(sCatHat, { top.x + cosf(a) * 0.16f, top.y + 0.08f, sinf(a) * 0.16f }, 0.055f, 0.13f, 4, gold);
+                AddBlob(sCatHat, { top.x + cosf(a) * 0.20f, top.y + 0.04f, sinf(a) * 0.20f }, { 0.028f, 0.028f, 0.028f }, (i & 1) ? Rgb(236, 96, 110) : Rgb(110, 180, 240));
+            }
+            break;
+        }
+        case 9: {   // headphones
+            const Vector3 shell = Rgb(240, 128, 144), bandCol = Rgb(70, 60, 80);
+            const float ez = 0.39f * hw;
+            const Vector3 arc[5] = { { top.x, 0.10f, ez }, { top.x, 0.30f, ez * 0.75f }, { top.x, 0.38f, 0 }, { top.x, 0.30f, -ez * 0.75f }, { top.x, 0.10f, -ez } };
+            for (int i = 0; i < 4; i++) AddBeam(sCatHat, arc[i], arc[i + 1], 0.022f, bandCol);
+            for (int side = -1; side <= 1; side += 2) {
+                AddBlob(sCatHat, { top.x, 0.03f, side * ez }, { 0.12f, 0.14f, 0.07f }, shell);
+                AddBlob(sCatHat, { top.x, 0.03f, side * (ez + 0.04f) }, { 0.07f, 0.08f, 0.04f }, bandCol);
+            }
+            break;
+        }
+        case 10:    // halo
+            for (int i = 0; i < 12; i++) {
+                const float a0 = 2 * kPi * i / 12, a1 = 2 * kPi * (i + 1) / 12, y = top.y + 0.34f;
+                const Vector3 o0 = { top.x + cosf(a0) * 0.22f, y, sinf(a0) * 0.22f }, o1 = { top.x + cosf(a1) * 0.22f, y, sinf(a1) * 0.22f };
+                const Vector3 i0 = { top.x + cosf(a0) * 0.15f, y + 0.02f, sinf(a0) * 0.15f }, i1 = { top.x + cosf(a1) * 0.15f, y + 0.02f, sinf(a1) * 0.15f };
+                sCatHat.push_back({ o0, o1, i1, Rgb(255, 236, 150) });
+                sCatHat.push_back({ o0, i1, i0, Rgb(255, 246, 190) });
+            }
+            break;
+    }
+
+    // ---- Around the neck (cat space) ----
+    const LoftRing collar[2] = { { { 0.285f, 0.502f, 0 }, 0.210f * w + 0.014f, 0.222f }, { { 0.335f, 0.532f, 0 }, 0.176f * w + 0.014f, 0.188f } };
+    const Vector3 chin = { 0.37f, 0.365f, 0 };   // just under the neck, at the front
+    switch (gCfg.neck) {
+        case 1:     // bell collar, in the cat's own colour
+            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return c.collar; });
+            AddBlob(sCatNeck, chin, { 0.048f, 0.048f, 0.048f }, gold);
+            break;
+        case 2: {   // bow tie
+            const Vector3 silk = Rgb(226, 86, 100);
+            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return Rgb(60, 52, 70); });
+            AddBlob(sCatNeck, { chin.x, chin.y, 0.085f }, { 0.04f, 0.065f, 0.075f }, silk);
+            AddBlob(sCatNeck, { chin.x, chin.y, -0.085f }, { 0.04f, 0.065f, 0.075f }, silk);
+            AddBlob(sCatNeck, { chin.x + 0.015f, chin.y, 0 }, { 0.04f, 0.04f, 0.035f }, Rgb(190, 66, 84));
+            break;
+        }
+        case 3: {   // scarf, striped, with one end hanging
+            const LoftRing wrap[2] = { { { 0.265f, 0.495f, 0 }, 0.245f * w + 0.03f, 0.25f }, { { 0.345f, 0.540f, 0 }, 0.20f * w + 0.03f, 0.21f } };
+            AddLoft(sCatNeck, wrap, 2, 8, Z, Y, [&](int, int side, float) -> Vector3 { return (side & 1) ? Rgb(236, 110, 110) : Rgb(250, 240, 226); });
+            AddBox(sCatNeck, { 0.33f, 0.33f, 0.21f * w }, { 0.035f, 0.12f, 0.05f }, Rgb(236, 110, 110));
+            AddBox(sCatNeck, { 0.33f, 0.20f, 0.21f * w }, { 0.037f, 0.025f, 0.052f }, Rgb(250, 240, 226));
+            break;
+        }
+        case 4: {   // bandana
+            const Vector3 cloth = Rgb(232, 98, 98);
+            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return cloth; });
+            sCatNeck.push_back({ { 0.385f, 0.47f, 0.18f }, { 0.385f, 0.47f, -0.18f }, { 0.44f, 0.25f, 0 }, cloth });
+            sCatNeck.push_back({ { 0.39f, 0.44f, 0.08f }, { 0.39f, 0.44f, -0.08f }, { 0.425f, 0.34f, 0 }, Rgb(250, 240, 226) });
+            break;
+        }
+        case 5:     // flower garland
+            for (int i = 0; i < 9; i++) {
+                const float a = 2 * kPi * i / 9;
+                AddBlob(sCatNeck, { 0.31f + 0.03f * sinf(a), 0.517f + 0.215f * sinf(a), 0.215f * w * cosf(a) }, { 0.055f, 0.055f, 0.055f }, kPetals[i & 3]);
+            }
+            break;
+    }
+
+    // ---- On the back (cat space; the top of the back is around y = 0.69) ----
+    switch (gCfg.back) {
+        case 1: {   // backpack
+            const Vector3 canvas = Rgb(96, 176, 186);
+            AddBox(sCatBack, { -0.04f, 0.74f, 0 }, { 0.15f, 0.12f, 0.19f }, canvas);
+            AddBox(sCatBack, { -0.04f, 0.83f, 0 }, { 0.155f, 0.04f, 0.195f }, Rgb(70, 140, 156));
+            AddBox(sCatBack, { -0.20f, 0.71f, 0 }, { 0.02f, 0.07f, 0.11f }, Rgb(250, 222, 130));
+            for (int side = -1; side <= 1; side += 2) AddBox(sCatBack, { 0.02f, 0.60f, side * 0.21f }, { 0.03f, 0.13f, 0.012f }, Rgb(70, 140, 156));
+            break;
+        }
+        case 2:     // balloon; modelled around the knot where its string is tied, so it can sway
+            AddBeam(sCatBack, { 0, 0, 0 }, { -0.10f, 0.78f, 0 }, 0.008f, white);
+            AddBlob(sCatBack, { -0.12f, 1.02f, 0 }, { 0.21f, 0.25f, 0.21f }, Rgb(240, 110, 120));
+            AddCone(sCatBack, { -0.105f, 0.74f, 0 }, 0.04f, 0.05f, 4, Rgb(214, 86, 100));
+            AddBox(sCatBack, { -0.05f, 1.10f, 0.15f }, { 0.02f, 0.05f, 0.02f }, Rgb(255, 214, 220));
+            break;
+        case 3:     // wings; one wing, drawn once for each side
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.34f, 0.30f, 0 }, { -0.42f, 0.04f, 0 }, Rgb(255, 255, 255) });
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.42f, 0.04f, 0 }, { -0.30f, -0.12f, 0 }, Rgb(236, 240, 252) });
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.16f, 0.24f, 0 }, { -0.34f, 0.30f, 0 }, Rgb(246, 248, 255) });
+            break;
     }
 }
 
@@ -1247,6 +1425,163 @@ static void GroundColours(float x, Vector3& grass, Vector3& path)
     const BiomeLook a = LookOf(m.a), b = LookOf(m.b);
     grass = Vector3Multiply(Mix(a.grass, b.grass, m.t), gShadeGrass);
     path = Vector3Multiply(Mix(a.path, b.path, m.t), gShadePath);
+}
+
+// ---------------------------------------------------------------------------
+// Progress and things to unlock
+// ---------------------------------------------------------------------------
+// Playing unlocks cats and things for them to wear. Nothing is bought: every
+// item has one plain condition, checked against a handful of lifetime numbers,
+// so only those numbers are saved.
+
+struct Progress {
+    int songs = 0, perfects = 0, bestStreak = 0, bestRank = 9, fullCombos = 0;
+    int places = 0;          // bit per place walked through
+    float minutes = 0.0f;
+    unsigned known = 0;      // bit per item already seen unlocked in the wardrobe
+};
+static Progress gProgress;
+static bool gUnlockAll = false;   // screenshot option
+
+enum Slot { SLOT_CAT, SLOT_HAT, SLOT_NECK, SLOT_BACK, SLOT_COUNT };
+enum Need { NEED_NONE, NEED_SONGS, NEED_PERFECTS, NEED_STREAK, NEED_RANK, NEED_PLACE, NEED_MINUTES, NEED_FULLCOMBO };
+
+struct Item { int slot; const char* name; int need, amount; };
+
+// Within a slot, the order here is the value stored in the settings. Cats match kCats.
+static const Item kItems[] = {
+    { SLOT_CAT, "Mango", NEED_NONE, 0 },
+    { SLOT_CAT, "Domino", NEED_NONE, 0 },
+    { SLOT_CAT, "Mochi", NEED_NONE, 0 },
+    { SLOT_CAT, "Luna", NEED_SONGS, 3 },
+    { SLOT_CAT, "Pebble", NEED_PERFECTS, 300 },
+    { SLOT_CAT, "Cloud", NEED_STREAK, 60 },
+    { SLOT_CAT, "Midnight", NEED_SONGS, 6 },
+
+    { SLOT_HAT, "No hat", NEED_NONE, 0 },
+    { SLOT_HAT, "Bow", NEED_NONE, 0 },
+    { SLOT_HAT, "Flower crown", NEED_PERFECTS, 50 },
+    { SLOT_HAT, "Party hat", NEED_STREAK, 25 },
+    { SLOT_HAT, "Straw hat", NEED_PLACE, BIOME_SEASIDE },
+    { SLOT_HAT, "Beanie", NEED_PLACE, BIOME_SNOW },
+    { SLOT_HAT, "Witch hat", NEED_PLACE, BIOME_AUTUMN },
+    { SLOT_HAT, "Top hat", NEED_RANK, 1 },
+    { SLOT_HAT, "Crown", NEED_RANK, 0 },
+    { SLOT_HAT, "Headphones", NEED_SONGS, 10 },
+    { SLOT_HAT, "Halo", NEED_FULLCOMBO, 1 },
+
+    { SLOT_NECK, "Nothing", NEED_NONE, 0 },
+    { SLOT_NECK, "Bell collar", NEED_NONE, 0 },
+    { SLOT_NECK, "Bow tie", NEED_SONGS, 1 },
+    { SLOT_NECK, "Scarf", NEED_PERFECTS, 150 },
+    { SLOT_NECK, "Bandana", NEED_STREAK, 40 },
+    { SLOT_NECK, "Flower garland", NEED_PLACE, BIOME_BLOSSOM },
+
+    { SLOT_BACK, "Nothing", NEED_NONE, 0 },
+    { SLOT_BACK, "Backpack", NEED_MINUTES, 10 },
+    { SLOT_BACK, "Balloon", NEED_SONGS, 5 },
+    { SLOT_BACK, "Wings", NEED_STREAK, 100 },
+};
+const int kItemCount = (int)(sizeof(kItems) / sizeof(kItems[0]));
+
+static int RankOf(float accuracy) { return accuracy >= 0.95f ? 0 : accuracy >= 0.88f ? 1 : accuracy >= 0.78f ? 2 : accuracy >= 0.65f ? 3 : 4; }
+
+static int SlotSize(int slot)
+{
+    int n = 0;
+    for (const Item& it : kItems) n += it.slot == slot;
+    return n;
+}
+
+// Index into kItems of the nth item of a slot.
+static int ItemIndex(int slot, int n)
+{
+    for (int i = 0; i < kItemCount; i++)
+        if (kItems[i].slot == slot && n-- == 0) return i;
+    return 0;
+}
+
+static bool Unlocked(const Item& it)
+{
+    if (gUnlockAll) return true;
+    const Progress& g = gProgress;
+    switch (it.need) {
+        case NEED_SONGS:     return g.songs >= it.amount;
+        case NEED_PERFECTS:  return g.perfects >= it.amount;
+        case NEED_STREAK:    return g.bestStreak >= it.amount;
+        case NEED_RANK:      return g.bestRank <= it.amount;
+        case NEED_PLACE:     return (g.places >> it.amount) & 1;
+        case NEED_MINUTES:   return g.minutes >= (float)it.amount;
+        case NEED_FULLCOMBO: return g.fullCombos >= it.amount;
+        default:             return true;
+    }
+}
+
+// What it takes, with how far along the player is.
+static const char* Requirement(const Item& it)
+{
+    const Progress& g = gProgress;
+    switch (it.need) {
+        case NEED_SONGS:     return TextFormat(it.amount == 1 ? "finish a song" : "finish %d songs  %d/%d", it.amount, std::min(g.songs, it.amount), it.amount);
+        case NEED_PERFECTS:  return TextFormat("%d purrfect hits  %d/%d", it.amount, std::min(g.perfects, it.amount), it.amount);
+        case NEED_STREAK:    return TextFormat("streak of %d  best %d", it.amount, g.bestStreak);
+        case NEED_RANK:      return it.amount == 0 ? "earn an S rank" : "earn an A rank";
+        case NEED_PLACE:     return TextFormat("visit the %s", kBiomeName[it.amount]);
+        case NEED_MINUTES:   return TextFormat("walk %d minutes  %d/%d", it.amount, std::min((int)g.minutes, it.amount), it.amount);
+        case NEED_FULLCOMBO: return "a song with no misses";
+        default:             return "";
+    }
+}
+
+static int UnlockedCount()
+{
+    int n = 0;
+    for (const Item& it : kItems) n += Unlocked(it);
+    return n;
+}
+
+static std::string ProgressPath() { return std::string(GetApplicationDirectory()) + "oniria.save"; }
+
+static void LoadProgress()
+{
+    FILE* f = fopen(ProgressPath().c_str(), "r");
+    if (!f) return;
+    char key[32];
+    double v;
+    while (fscanf(f, "%31[^=]=%lf\n", key, &v) == 2) {
+        if (!strcmp(key, "songs")) gProgress.songs = (int)v;
+        else if (!strcmp(key, "perfects")) gProgress.perfects = (int)v;
+        else if (!strcmp(key, "streak")) gProgress.bestStreak = (int)v;
+        else if (!strcmp(key, "rank")) gProgress.bestRank = (int)v;
+        else if (!strcmp(key, "full")) gProgress.fullCombos = (int)v;
+        else if (!strcmp(key, "places")) gProgress.places = (int)v;
+        else if (!strcmp(key, "minutes")) gProgress.minutes = (float)v;
+        else if (!strcmp(key, "known")) gProgress.known = (unsigned)v;
+    }
+    fclose(f);
+}
+
+static void SaveProgress()
+{
+    if (gSim) return;
+    FILE* f = fopen(ProgressPath().c_str(), "w");
+    if (!f) return;
+    fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nknown=%u\n",
+            gProgress.songs, gProgress.perfects, gProgress.bestStreak, gProgress.bestRank, gProgress.fullCombos,
+            gProgress.places, gProgress.minutes, gProgress.known);
+    fclose(f);
+}
+
+static std::vector<int> gNewUnlocks;   // items earned by the song that just ended
+static bool gSimCounts = false;        // screenshot option: let a simulated run earn progress
+
+// Anything equipped that is not unlocked falls back to the default for its slot.
+static void CheckEquipped()
+{
+    int* field[SLOT_COUNT] = { &gCfg.cat, &gCfg.hat, &gCfg.neck, &gCfg.back };
+    static const int kDefault[SLOT_COUNT] = { 0, 0, 1, 0 };
+    for (int slot = 0; slot < SLOT_COUNT; slot++)
+        if (*field[slot] < 0 || *field[slot] >= SlotSize(slot) || !Unlocked(kItems[ItemIndex(slot, *field[slot])])) *field[slot] = kDefault[slot];
 }
 
 // Height of the path at world x. During a song the hills are the song's
@@ -1678,6 +2013,22 @@ static void FinishGame()
         if (!gNoteState[i]) { gNoteState[i] = 4; gCount[J_MISS]++; }
     gEndJoy = std::clamp((Accuracy() - 0.6f) / 0.35f, 0.0f, 1.0f) * 0.85f;
     gNewBest = false;
+    gNewUnlocks.clear();
+    if ((!gCfg.watch && !gSim) || gSimCounts) {
+        // Lifetime numbers, and whatever they have just unlocked.
+        std::vector<bool> before;
+        for (const Item& it : kItems) before.push_back(Unlocked(it));
+        const int notes = gCount[0] + gCount[1] + gCount[2] + gCount[3];
+        gProgress.songs++;
+        gProgress.perfects += gCount[J_PERFECT];
+        gProgress.bestStreak = std::max(gProgress.bestStreak, gMaxCombo);
+        gProgress.bestRank = std::min(gProgress.bestRank, RankOf(Accuracy()));
+        if (notes > 0 && gCount[J_MISS] == 0) gProgress.fullCombos++;
+        gProgress.minutes += (float)(gSong.duration / 60.0);
+        for (int i = 0; i < kItemCount; i++)
+            if (!before[i] && Unlocked(kItems[i])) gNewUnlocks.push_back(i);
+        SaveProgress();
+    }
     if (!gCfg.watch && !gSim) {
         if (SongEntry* e = FindSong(gSongPath)) {
             if (Accuracy() > e->best[gCfg.diff]) {
@@ -1724,6 +2075,7 @@ static void UpdatePlaying(double t)
         gHead++;
     }
     while (gTail < total && gChart->time[gTail] < t - 3.5) gTail++;
+    if (!gCfg.watch || gSimCounts) gProgress.places |= 1 << BiomeNear(gScene.worldX);   // remember where the walk has been
     if (t > gSong.duration + 0.6) FinishGame();
 }
 
@@ -1784,10 +2136,12 @@ static void UpdateScene(float dt, double t)
     float joyTarget = gJoy;
     if (gState == ST_PLAYING) joyTarget = 1.0f - expf(-gStreak / 18.0f);
     else if (gState == ST_RESULTS) joyTarget = gEndJoy;
+    else if (gState == ST_WARDROBE) joyTarget = 0.5f;   // dressing up is fun
     else if (!PathFollowsSong()) joyTarget = 0.22f;   // menus keep a little sparkle
     gJoy += (joyTarget - gJoy) * std::min(1.0f, dt * (joyTarget > gJoy ? 3.0f : 5.0f));
     gJoyKick *= expf(-dt * 7.0f);
     gEdgePower *= expf(-dt * 6.0f);
+    gPreview += ((gState == ST_WARDROBE ? 1.0f : 0.0f) - gPreview) * std::min(1.0f, dt * 5.0f);
     gMilestoneAge += dt;
 
     for (int a = 0; a < ACT_COUNT; a++) s.glow[a] = gHeld[a] ? 1.0f : s.glow[a] * expf(-dt * 9.0f);
@@ -2459,7 +2813,7 @@ static void DrawCat(float x, bool walking)
         case ACT_RING:    lift = 0.22f * arc; pitch = 0.95f * arc; frontLegs = 1.6f * arc; break;
         case ACT_STUMBLE: roll = 0.35f * sinf(u * kPi * 4) * (1 - u); pitch = -0.15f * arc; break;
     }
-    const float phase = x * 2.4f;
+    const float phase = x * 3.0f;   // short legs take quick little steps
     const bool stepping = walking && lift < 0.05f;
     // A happy cat prances: a bigger bounce in its step, and a little hop on every beat.
     const float bob = walking ? (0.03f + 0.06f * joy) * fabsf(cosf(phase)) + 0.06f * joy * gScene.beat : 0.0f;
@@ -2467,7 +2821,7 @@ static void DrawCat(float x, bool walking)
 
     // The whole cat pivots around its back hips, so pitching up reads as standing.
     // It stretches upwards for an instant on every perfect hit.
-    const Vector3 hips = { -0.30f, 0.38f, 0.0f };
+    const Vector3 hips = { -0.24f, 0.31f, 0.0f };
     Matrix root = MatrixTranslate(-hips.x, -hips.y, -hips.z);
     root = MatrixMultiply(root, MatrixRotateX(roll));
     root = MatrixMultiply(root, MatrixRotateZ(pitch + slope * 0.7f));
@@ -2476,28 +2830,44 @@ static void DrawCat(float x, bool walking)
     root = MatrixMultiply(root, MatrixTranslate(x, ground + lift + bob, 0.0f));
 
     const Vector3 plain = { 1, 1, 1 };
-    const float lift2 = 0.22f;   // how far the cat's shading is pulled towards its true colours
+    const float lift2 = 0.3f;    // how far the cat's shading is pulled towards its true colours
     DrawShape(sCatBody, root, plain, lift2);
+    DrawShape(sCatNeck, root, plain, lift2);
+    if (gCfg.back == 1) {
+        DrawShape(sCatBack, root, plain, lift2);
+    } else if (gCfg.back == 2) {   // the balloon trails behind and bobs
+        const Matrix tied = MatrixMultiply(MatrixRotateZ(0.25f + 0.1f * sinf(gScene.time * 1.7f) + 0.05f * gScene.beat), MatrixTranslate(-0.08f, 0.66f, 0));
+        DrawShape(sCatBack, MatrixMultiply(tied, root), plain, 0.35f);
+    } else if (gCfg.back == 3) {   // wings flutter, faster when happy
+        const float flap = 0.35f + 0.45f * sinf(gScene.time * (7.0f + 6.0f * joy));
+        for (int side = -1; side <= 1; side += 2) {
+            const Matrix wing = MatrixMultiply(MatrixRotateX(-side * (0.5f + flap)), MatrixTranslate(0.06f, 0.66f, side * 0.14f));
+            DrawShape(sCatWing, MatrixMultiply(wing, root), plain, 0.5f);
+        }
+    }
 
-    // The head stays roughly level, is turned a little towards the camera, and nods along when happy.
-    Matrix head = MatrixRotateY(-0.35f);
+    // The head is big, stays roughly level, is turned a little towards the camera, and nods along when happy.
+    Matrix head = MatrixScale(1.22f, 1.22f, 1.22f);
+    head = MatrixMultiply(head, MatrixRotateX(0.05f * sinf(gScene.time * 0.9f)));   // a slow curious tilt
+    head = MatrixMultiply(head, MatrixRotateY(-0.78f));                              // three-quarter view: both eyes show
     head = MatrixMultiply(head, MatrixRotateZ(-pitch * 0.55f + 0.05f * sinf(gScene.time * 1.3f) + 0.09f * joy * sinf(gScene.wag * 1.5f)));
-    head = MatrixMultiply(MatrixScale(1.08f, 1.08f, 1.08f), head);
-    head = MatrixMultiply(head, MatrixTranslate(0.44f, 0.83f + 0.02f * sinf(phase * 2), 0));
+    head = MatrixMultiply(head, MatrixTranslate(0.33f, 0.76f + 0.02f * sinf(phase * 2), 0.04f));
     head = MatrixMultiply(head, root);
-    DrawShape(sCatHead, head, plain, lift2);
-    if (joy > 0.3f) DrawShape(sCatBlush, head, plain, 0.5f);
+    DrawShape(sCatHead, head, plain, 0.48f);
+    DrawShape(sCatHat, head, plain, gCfg.hat == 10 ? 0.85f : 0.3f);
+    // Rosy cheeks all the time, rosier when happy.
+    DrawShape(sCatBlush, head, plain, joy > 0.3f ? 0.9f : 0.45f);
     const bool blinking = fmodf(gScene.time, 3.7f) < 0.12f;
     const bool pleased = (gJudgeKind == J_PERFECT && gJudgeAge < 0.3f) || joy > 0.6f;   // eyes smile shut
-    const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.12f : pleased ? 0.42f : 1.0f, 1.0f), MatrixTranslate(0, 0.05f, 0));
+    const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.12f : pleased ? 0.42f : 1.0f, 1.0f), MatrixTranslate(0, 0.0f, 0));
     DrawShape(sCatEyes, MatrixMultiply(eyes, head), plain, 0.55f);
 
     // Legs: diagonal pairs step together, and each paw lifts as its leg swings forward.
     for (int i = 0; i < 4; i++) {
         const bool front = i < 2, nearSide = (i & 1) == 0;
         const float legPhase = phase + ((front == nearSide) ? 0.0f : kPi);
-        float upper = stepping ? 0.5f * sinf(legPhase) : 0.0f;
-        float lower = stepping ? -0.75f * std::max(0.0f, cosf(legPhase)) : 0.0f;
+        float upper = stepping ? 0.55f * sinf(legPhase) : 0.0f;
+        float lower = stepping ? -0.8f * std::max(0.0f, cosf(legPhase)) : 0.0f;
         if (front) {
             upper += frontLegs + tuck + (nearSide ? paw : 0.0f);
             lower -= 0.8f * tuck + 0.3f * frontLegs + (nearSide ? 0.25f * paw : 0.0f);
@@ -2505,18 +2875,18 @@ static void DrawCat(float x, bool walking)
             upper -= tuck * 0.9f;
             lower += 0.3f * tuck;
         }
-        const Vector3 hip = front ? Vector3{ 0.26f, 0.37f, nearSide ? 0.14f : -0.14f } : Vector3{ -0.30f, 0.38f, nearSide ? 0.16f : -0.16f };
+        const Vector3 hip = front ? Vector3{ 0.22f, 0.30f, nearSide ? 0.14f : -0.14f } : Vector3{ -0.24f, 0.31f, nearSide ? 0.16f : -0.16f };
         const Matrix thigh = MatrixMultiply(MatrixRotateZ(upper), MatrixTranslate(hip.x, hip.y, hip.z));
-        const Matrix shin = MatrixMultiply(MatrixMultiply(MatrixRotateZ(lower), MatrixTranslate(0, -0.17f, 0)), thigh);
+        const Matrix shin = MatrixMultiply(MatrixMultiply(MatrixRotateZ(lower), MatrixTranslate(0, -0.13f, 0)), thigh);
         DrawShape(sCatThigh[front ? 0 : 1], MatrixMultiply(thigh, root), plain, lift2);
         DrawShape(sCatShin[front ? 0 : 1], MatrixMultiply(shin, root), plain, lift2);
     }
 
     // The tail goes up and wags faster with the mood; the wave travels from base to tip.
     const float amp = 0.12f + 0.14f * joy;
-    Matrix seg = MatrixMultiply(MatrixRotateZ(0.95f - 0.4f * joy + amp * sinf(gScene.wag) + 0.1f * gScene.beat), MatrixTranslate(-0.48f, 0.56f, 0));
+    Matrix seg = MatrixMultiply(MatrixRotateZ(0.95f - 0.4f * joy + amp * sinf(gScene.wag) + 0.1f * gScene.beat), MatrixTranslate(-0.40f, 0.50f, 0));
     for (int i = 0; i < 5; i++) {
-        if (i > 0) seg = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.28f + amp * sinf(gScene.wag - i * 0.7f)), MatrixTranslate(0, 0.2f, 0)), seg);
+        if (i > 0) seg = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.28f + amp * sinf(gScene.wag - i * 0.7f)), MatrixTranslate(0, 0.18f, 0)), seg);
         DrawShape(sCatTail[i], MatrixMultiply(seg, root), plain, lift2);
     }
 }
@@ -2722,7 +3092,7 @@ static void DrawHitOverlay()
         }
     }
     if (gEdgePower > 0.02f) {
-        const Color c = ToColor(gEdgeColour, 0.32f * gEdgePower), none = ToColor(gEdgeColour, 0.0f);
+        const Color c = ToColor(gEdgeColour, 0.32f * gEdgePower * (0.35f + 0.65f * MotionScale())), none = ToColor(gEdgeColour, 0.0f);
         const int w = gVW / 9, h = gVH / 7;
         DrawRectangleGradientH(0, 0, w, gVH, c, none);
         DrawRectangleGradientH(gVW - w, 0, w, gVH, none, c);
@@ -2741,16 +3111,18 @@ static void RenderWorld(double t)
     // come the hit springs, a breath on every kick drum, and a slow drift that
     // grows with the streak.
     const float aspect = (float)gVW / (float)gVH, tanHalf = 0.3057f;   // tan(34 deg / 2)
-    const float dist = gCloseup ? 4.2f : std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
+    const float wide = std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
+    const float dist = gCloseup ? 4.2f : wide + (5.2f - wide) * gPreview;
     const float reach = dist / 9.8f;
     gViewHalf = dist * tanHalf * aspect;
     gViewCentre = s.worldX + (gCloseup ? 0.2f : gViewHalf * 0.47f);
-    const float driftX = 0.3f * gJoy * sinf(s.time * 0.7f), driftY = 0.1f * gJoy * sinf(s.time * 1.1f);
-    const float camX = gViewCentre + (gRig.x + driftX) * reach, baseY = s.camY + (gCloseup ? 0.8f : 1.3f);
+    const float motion = MotionScale();
+    const float driftX = 0.3f * gJoy * motion * sinf(s.time * 0.7f), driftY = 0.1f * gJoy * motion * sinf(s.time * 1.1f);
+    const float camX = gViewCentre + (gRig.x + driftX) * reach, baseY = s.camY + (gCloseup ? 0.8f : 1.3f - 0.5f * gPreview);
     gCamera.position = Vector3{ camX, baseY + 1.3f * reach + (gRig.y + driftY) * reach, dist };
     gCamera.target = Vector3{ gViewCentre + gRig.x * 0.5f * reach, baseY + gRig.y * 0.5f * reach, 0.0f };
     gCamera.up = Vector3{ sinf(gRig.roll), cosf(gRig.roll), 0 };
-    gCamera.fovy = 34.0f - gRig.zoom - 0.45f * s.beat * (0.3f + 0.7f * gJoy);
+    gCamera.fovy = 34.0f - gRig.zoom - 0.45f * motion * s.beat * (0.3f + 0.7f * gJoy);
     gCamera.projection = CAMERA_PERSPECTIVE;
 
     // The time of day shades the ground; the place decides its colour and tints the sky.
@@ -2841,8 +3213,6 @@ static const Color kCream     = { 255, 252, 246, 255 };
 
 static const char* kRankLetter[5] = { "S", "A", "B", "C", "D" };
 static const Color kRankColour[5] = { { 244, 178, 60, 255 }, { 92, 188, 140, 255 }, { 96, 168, 226, 255 }, { 160, 132, 220, 255 }, { 226, 122, 142, 255 } };
-static int RankOf(float accuracy) { return accuracy >= 0.95f ? 0 : accuracy >= 0.88f ? 1 : accuracy >= 0.78f ? 2 : accuracy >= 0.65f ? 3 : 4; }
-
 // align: 0 left, 1 centre, 2 right
 static void Text(const char* text, int x, int y, int size, Color color, int align = 1, bool shadow = true)
 {
@@ -2979,6 +3349,24 @@ static void PickSong(int index)
     else BeginLoad(entry.path, false);
 }
 
+static State gSettingsFrom = ST_MENU;   // where the settings screen returns to
+static int   gWardrobeTab = SLOT_HAT, gWardrobeSel = -1, gSettingsTab = 0;
+static float gResetArmedUntil = -1.0f;
+
+static void OpenSettings()
+{
+    gSettingsFrom = gState;
+    gState = ST_SETTINGS;
+}
+
+// True while something has been unlocked that the player has not looked at yet.
+static bool HasNewItems()
+{
+    for (int i = 0; i < kItemCount; i++)
+        if (kItems[i].need != NEED_NONE && Unlocked(kItems[i]) && !((gProgress.known >> i) & 1)) return true;
+    return false;
+}
+
 // Title on the left over the strolling cat; on the right, a shelf with every song that has been opened.
 static void DrawMenu()
 {
@@ -2992,23 +3380,18 @@ static void DrawMenu()
         Card(leftCx - w / 2, 58 + titleSize, w, 18, kPaper, kCoralLine);
         Text(msg.c_str(), leftCx, 62 + titleSize, 10, kCoralLine, 1, false);
     }
-    // Who is walking: left and right choose the cat, and the new one does a little hop.
-    {
-        const CatKind& cat = kCats[gCfg.cat];
-        const int y = gVH - 60;
-        int step = 0;
-        if (Button(leftCx - 104, y, 20, 20, "<") || Key(KEY_LEFT)) step = -1;
-        if (Button(leftCx + 84, y, 20, 20, ">") || Key(KEY_RIGHT)) step = 1;
-        Card(leftCx - 80, y, 160, 20, kPaper, kLine);
-        Text(TextFormat("%s  -  %s", cat.name, cat.note), leftCx, y + 5, 10, kCocoa, 1, false);
-        if (step) {
-            gCfg.cat = (gCfg.cat + step + kCatCount) % kCatCount;
-            BuildCat(gCfg.cat);
-            CatDo(ACT_HOP);
-        }
+
+    // Dress the cat, or change how the game behaves.
+    const int by0 = gVH - 62;
+    if (Button(leftCx - 100, by0, 96, 22, "Wardrobe") || Key(KEY_C)) { gState = ST_WARDROBE; gWardrobeSel = -1; }
+    if (HasNewItems()) {   // something new is waiting in there
+        Poly2((float)leftCx - 8, (float)by0 + 1, 4.5f, 4.5f, 8, 0, kCoralLine);
+        Poly2((float)leftCx - 8, (float)by0 + 1, 3.5f, 3.5f, 8, 0, kCoral);
     }
+    if (Button(leftCx + 4, by0, 96, 22, "Settings") || Key(KEY_S)) OpenSettings();
     Text(TextFormat("now passing: %s, %s", kBiomeName[BiomeNear(gScene.worldX)], kVariantName[BiomeNear(gScene.worldX)][VariantNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
     Text("Esc pauses  -  F11 fullscreen", leftCx, gVH - 16, 10, kSoft);
+    if (gState != ST_MENU) return;
 
     Card(shelfX, shelfY, shelfW, shelfH, kPaper, kLine);
     Paw2((float)shelfX + 19, (float)shelfY + 20, 6, kCoral);
@@ -3103,10 +3486,64 @@ static bool Stepper(int left, int y, int w, const char* label, const char* value
     return delta != 0;
 }
 
+// Small controls shared by the settings screen.
+
+// A row of pips for a value from 0 to `count`. Clicking the first lit pip again turns it off.
+static bool Pips(int right, int y, int count, int& value)
+{
+    bool changed = false;
+    const int w = 8, gap = 2, x0 = right - count * (w + gap) + gap;
+    for (int i = 0; i < count; i++) {
+        const int x = x0 + i * (w + gap);
+        const bool hot = CheckCollisionPointRec(Mouse(), Rectangle{ (float)x - 1, (float)y - 2, (float)w + 2, 16 }), on = i < value;
+        Card(x, y + (hot ? -1 : 0), w, 12, on ? kCoral : kPaperDeep, on ? kCoralLine : kLine, false);
+        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) {
+            value = (value == 1 && i == 0) ? 0 : i + 1;
+            changed = true;
+        }
+    }
+    if (changed) PlaySfx(SFX_CLICK, (float)value);
+    return changed;
+}
+
+// An on/off switch with a sliding knob.
+static bool Switch(int right, int y, bool on)
+{
+    const int w = 28, h = 14, x = right - w;
+    const bool hot = CheckCollisionPointRec(Mouse(), Rectangle{ (float)x, (float)y, (float)w, (float)h });
+    Card(x, y, w, h, on ? (hot ? kCoralHot : kCoral) : kPaperDeep, on ? kCoralLine : kLine, false);
+    Card(on ? x + w - 13 : x + 1, y + 1, 12, 12, kCream, on ? kCoralLine : kLine, false);
+    const bool clicked = hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState;
+    if (clicked) PlaySfx(SFX_CLICK, on ? 0.0f : 4.0f);
+    return clicked;
+}
+
+// A few choices side by side; the chosen one is highlighted.
+static bool Choice(int right, int y, const char* const* labels, int count, int& value, int cell = 50)
+{
+    bool changed = false;
+    for (int i = 0; i < count; i++)
+        if (Button(right - (count - i) * (cell + 2) + 2, y, cell, 18, labels[i], value == i ? 2 : 0) && value != i) { value = i; changed = true; }
+    return changed;
+}
+
+static void Lock2(int x, int y, Color c)
+{
+    DrawRectangleLines(x + 1, y, 5, 6, c);
+    DrawRectangle(x, y + 4, 7, 6, c);
+}
+
+static void Gear2(float cx, float cy, Color c)
+{
+    for (int i = 0; i < 6; i++) Poly2(cx + cosf(i * kPi / 3) * 5.5f, cy + sinf(i * kPi / 3) * 5.5f, 2.2f, 2.2f, 4, i * kPi / 3, c);
+    Poly2(cx, cy, 5.5f, 5.5f, 10, 0, c);
+    Poly2(cx, cy, 2.2f, 2.2f, 8, 0, kPaper);
+}
+
 static void DrawReady()
 {
     int left, top;
-    const int pw = 300, ph = 300;
+    const int pw = 300, ph = 244;
     Panel(pw, ph, left, top, true);
     const int cx = left + pw / 2, x0 = left + 16, inner = pw - 32;
 
@@ -3136,23 +3573,18 @@ static void DrawReady()
     }
 
     int delta;
-    if (Stepper(x0, top + 122, inner, "Walking speed", TextFormat("%.1fx", gCfg.speed), delta))
-        gCfg.speed = std::clamp(std::round((gCfg.speed + delta * 0.1f) * 10.0f) / 10.0f, 0.6f, 2.0f);
-    if (Stepper(x0, top + 144, inner, "Audio offset", TextFormat("%+d ms", gCfg.offsetMs), delta))
-        gCfg.offsetMs = std::clamp(gCfg.offsetMs + delta * 5, -300, 300);
-    if (Stepper(x0, top + 166, inner, "Sound effects", TextFormat("%d%%", gCfg.sfx * 10), delta))
-        gCfg.sfx = std::clamp(gCfg.sfx + delta, 0, 10);
-    if (Stepper(x0, top + 188, inner, "Scenery", gCfg.scenery == 0 ? "Journey" : kBiomeName[gCfg.scenery - 1], delta, 112))
+    if (Stepper(x0, top + 124, inner, "Scenery", gCfg.scenery == 0 ? "Journey" : kBiomeName[gCfg.scenery - 1], delta, 112))
         gCfg.scenery = (gCfg.scenery + delta + BIOME_COUNT + 1) % (BIOME_COUNT + 1);
 
     const int tw = (inner - 4) / 2;
-    if (Button(x0, top + 214, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
-    if (Button(x0 + tw + 4, top + 214, tw, 20, gCfg.hints ? "Key hints: on" : "Key hints: off", gCfg.hints ? 2 : 0)) gCfg.hints = !gCfg.hints;
+    if (Button(x0, top + 152, tw, 20, gCfg.watch ? "Watch mode: on" : "Watch mode: off", gCfg.watch ? 2 : 0)) gCfg.watch = !gCfg.watch;
+    if (Button(x0 + tw + 4, top + 152, tw, 20, "Settings")) OpenSettings();
 
-    if (Button(cx - 70, top + 242, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
+    if (gState != ST_READY) return;
+    if (Button(cx - 70, top + 184, 140, 26, "Play", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) {
         SaveSettings();
         StartGame();
-    } else if (Button(cx - 70, top + 274, 140, 18, "Back to your songs") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 216, 140, 18, "Back to your songs") || Key(KEY_ESCAPE)) {
         gState = ST_MENU;
     }
 }
@@ -3246,7 +3678,7 @@ static void DrawPause()
 static void DrawResults()
 {
     int left, top;
-    const int pw = 300, ph = 250;
+    const int pw = 300, ph = 272;
     Panel(pw, ph, left, top, true);
     const int cx = left + pw / 2;
 
@@ -3274,10 +3706,207 @@ static void DrawResults()
         Text(kLabel[i], x, top + 159, 10, kCocoaSoft, 1, false);
     }
 
-    if (Button(cx - 70, top + 184, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
+    // What this walk unlocked, or failing that, the next thing within reach.
+    if (!gNewUnlocks.empty()) {
+        const int more = (int)gNewUnlocks.size() - 1;
+        const char* line = more > 0 ? TextFormat("unlocked: %s  +%d more", kItems[gNewUnlocks[0]].name, more) : TextFormat("unlocked: %s", kItems[gNewUnlocks[0]].name);
+        const int w = std::min(pw - 28, MeasureText(line, 10) + 34);
+        Card(cx - w / 2, top + 178, w, 20, kPeach, kPeachLine, false);
+        Paw2((float)(cx - w / 2 + 12), (float)top + 189, 4.5f, kCoral);
+        Text(line, cx + 8, top + 183, 10, kCocoa, 1, false);
+    } else {
+        for (const Item& it : kItems) {
+            if (Unlocked(it)) continue;
+            Text(Fit(TextFormat("next: %s - %s", it.name, Requirement(it)), 10, pw - 28).c_str(), cx, top + 183, 10, kCocoaSoft, 1, false);
+            break;
+        }
+    }
+
+    if (Button(cx - 70, top + 208, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
         StartGame();
-    } else if (Button(cx - 70, top + 216, 140, 18, "Back") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 240, 140, 18, "Back") || Key(KEY_ESCAPE)) {
         gState = ST_READY;
+    }
+}
+
+static void Equip(int slot, int n)
+{
+    int* field[SLOT_COUNT] = { &gCfg.cat, &gCfg.hat, &gCfg.neck, &gCfg.back };
+    *field[slot] = n;
+    BuildCat(gCfg.cat);
+    CatDo(ACT_HOP);   // a little hop to show it off
+    PlaySfx(SFX_TWINKLE, 0.0f, 0.8f);
+}
+
+// The wardrobe: the camera comes in close on the cat, and a panel lists the
+// cats and everything they can wear, with what each locked item is waiting for.
+static void DrawWardrobe()
+{
+    int left, top;
+    const int pw = 300, ph = 306;
+    Panel(pw, ph, left, top, true);
+    const int x0 = left + 12, inner = pw - 24;
+    const int equipped[SLOT_COUNT] = { gCfg.cat, gCfg.hat, gCfg.neck, gCfg.back };
+
+    Paw2((float)left + 19, (float)top + 20, 6, kCoral);
+    Text("Wardrobe", left + 32, top + 9, 20, kCocoa, 0, false);
+    Text(TextFormat("%d of %d", UnlockedCount(), kItemCount), left + pw - 14, top + 14, 10, kCocoaSoft, 2, false);
+
+    static const char* kTabs[SLOT_COUNT] = { "Cat", "Hat", "Neck", "Back" };
+    const int tw = (inner - 9) / 4;
+    for (int i = 0; i < SLOT_COUNT; i++)
+        if (Button(x0 + i * (tw + 3), top + 36, tw, 20, kTabs[i], gWardrobeTab == i ? 2 : 0)) { gWardrobeTab = i; gWardrobeSel = -1; }
+    if (Key(KEY_RIGHT)) { gWardrobeTab = (gWardrobeTab + 1) % SLOT_COUNT; gWardrobeSel = -1; }
+    if (Key(KEY_LEFT)) { gWardrobeTab = (gWardrobeTab + SLOT_COUNT - 1) % SLOT_COUNT; gWardrobeSel = -1; }
+
+    const int count = SlotSize(gWardrobeTab), rowH = 19, listY = top + 62;
+    if (gWardrobeSel < 0) gWardrobeSel = equipped[gWardrobeTab];
+    if (Key(KEY_DOWN)) gWardrobeSel = std::min(count - 1, gWardrobeSel + 1);
+    if (Key(KEY_UP)) gWardrobeSel = std::max(0, gWardrobeSel - 1);
+
+    int pick = Key(KEY_ENTER) || Key(KEY_SPACE) ? gWardrobeSel : -1;
+    for (int n = 0; n < count; n++) {
+        const int index = ItemIndex(gWardrobeTab, n), y = listY + n * rowH;
+        const Item& it = kItems[index];
+        const bool open = Unlocked(it), worn = equipped[gWardrobeTab] == n;
+        const bool hot = CheckCollisionPointRec(Mouse(), Rectangle{ (float)x0, (float)y, (float)inner, (float)(rowH - 2) });
+        if (worn) Card(x0, y, inner, rowH - 2, kPeach, kPeachLine, false);
+        else if (hot || n == gWardrobeSel) Card(x0, y, inner, rowH - 2, kPaperDeep, kLine, false);
+
+        if (worn) Paw2((float)x0 + 10, (float)y + 9, 4.5f, kCoral);
+        else if (open) Poly2((float)x0 + 10, (float)y + 8, 3.0f, 3.0f, 8, 0, Fade(kLine, 0.9f));
+        else Lock2(x0 + 7, y + 3, kCocoaSoft);
+
+        const char* note = gWardrobeTab == SLOT_CAT ? kCats[n].note : nullptr;
+        Text(it.name, x0 + 22, y + 4, 10, open ? kCocoa : kCocoaSoft, 0, false);
+        if (!open) {
+            Text(Requirement(it), x0 + inner - 6, y + 4, 10, kCocoaSoft, 2, false);
+        } else if (it.need != NEED_NONE && !((gProgress.known >> index) & 1)) {
+            Card(x0 + inner - 34, y + 2, 30, 13, kCoral, kCoralLine, false);
+            Text("new", x0 + inner - 19, y + 3, 10, kCream, 1, false);
+        } else if (note) {
+            Text(note, x0 + inner - 6, y + 4, 10, kCocoaSoft, 2, false);
+        }
+        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) { gWardrobeSel = n; pick = n; }
+    }
+    if (pick >= 0) {
+        if (Unlocked(kItems[ItemIndex(gWardrobeTab, pick)])) { if (equipped[gWardrobeTab] != pick) Equip(gWardrobeTab, pick); }
+        else PlaySfx(SFX_MISS, 0.0f, 0.7f);
+    }
+
+    if (Button(left + pw - 14 - 90, top + ph - 30, 90, 22, "Done", 1) || Key(KEY_ESCAPE)) {
+        for (int i = 0; i < kItemCount; i++)   // everything unlocked has now been seen
+            if (Unlocked(kItems[i])) gProgress.known |= 1u << i;
+        SaveProgress();
+        SaveSettings();
+        gState = ST_MENU;
+    }
+}
+
+// Settings: four tabs down the left, one setting per row with a short note under it.
+static void DrawSettings()
+{
+    int left, top;
+    const int pw = std::min(gVW - 20, 440), ph = 290;
+    Panel(pw, ph, left, top);
+    Gear2((float)left + 20, (float)top + 20, kCoral);
+    Text("Settings", left + 34, top + 9, 20, kCocoa, 0, false);
+
+    static const char* kTabs[4] = { "Sound", "Game", "Display", "Progress" };
+    for (int i = 0; i < 4; i++)
+        if (Button(left + 12, top + 44 + i * 28, 86, 24, kTabs[i], gSettingsTab == i ? 2 : 0)) gSettingsTab = i;
+    if (Key(KEY_DOWN)) gSettingsTab = std::min(3, gSettingsTab + 1);
+    if (Key(KEY_UP)) gSettingsTab = std::max(0, gSettingsTab - 1);
+    DrawRectangle(left + 106, top + 44, 1, ph - 86, Fade(kLine, 0.6f));
+
+    const int x0 = left + 118, right = left + pw - 16;
+    int y = top + 48;
+    // Each row: a name, a control on the right, a note underneath, then a dotted rule.
+    auto row = [&](const char* name, const char* note) {
+        Text(name, x0, y + 3, 10, kCocoa, 0, false);
+        Text(note, x0, y + 19, 10, kCocoaSoft, 0, false);
+    };
+    auto next = [&]() {
+        y += 36;
+        for (int x = x0; x < right; x += 4) DrawRectangle(x, y - 4, 2, 1, Fade(kLine, 0.7f));
+        y += 4;
+    };
+    auto stepper = [&](const char* value, int& delta) {
+        delta = 0;
+        if (Button(right - 18, y, 18, 18, "+")) delta = 1;
+        if (Button(right - 90, y, 18, 18, "-")) delta = -1;
+        Text(value, right - 45, y + 4, 10, kCocoa, 1, false);
+    };
+
+    int delta;
+    switch (gSettingsTab) {
+        case 0: {
+            row("Music", "how loud your song plays");
+            Pips(right, y, 10, gCfg.music);
+            next();
+            row("Sound effects", "the little notes when you hit");
+            Pips(right, y, 10, gCfg.sfx);
+            next();
+            row("Audio offset", "raise it if things arrive before the beat");
+            stepper(TextFormat("%+d ms", gCfg.offsetMs), delta);
+            gCfg.offsetMs = std::clamp(gCfg.offsetMs + delta * 5, -300, 300);
+            break;
+        }
+        case 1: {
+            row("Walking speed", "faster gives you less warning");
+            stepper(TextFormat("%.1fx", gCfg.speed), delta);
+            if (delta) gCfg.speed = std::clamp(std::round((gCfg.speed + delta * 0.1f) * 10.0f) / 10.0f, 0.6f, 2.0f);
+            next();
+            row("Key hints", "show the key above each thing");
+            if (Switch(right, y + 1, gCfg.hints)) gCfg.hints = !gCfg.hints;
+            next();
+            static const char* kMotion[3] = { "Still", "Gentle", "Full" };
+            row("Camera and effects", "how much the screen moves");
+            Choice(right, y, kMotion, 3, gCfg.motion);
+            break;
+        }
+        case 2: {
+            const bool full = !gSim && IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+            row("Fullscreen", "F11 does this too");
+            if (Switch(right, y + 1, full) && !gSim) ToggleBorderlessWindowed();
+            next();
+            static const char* kRates[3] = { "60", "120", "Max" };
+            row("Frame rate", "60 is the lightest on your computer");
+            Choice(right, y, kRates, 3, gCfg.fps, 40);
+            break;
+        }
+        case 3: {
+            auto line = [&](const char* name, const char* value) {
+                Text(name, x0, y, 10, kCocoa, 0, false);
+                Text(value, right, y, 10, kCocoa, 2, false);
+                y += 17;
+            };
+            line("Songs finished", TextFormat("%d", gProgress.songs));
+            line("Purrfect hits", TextFormat("%d", gProgress.perfects));
+            line("Best streak", TextFormat("%d", gProgress.bestStreak));
+            line("Time walked", TextFormat("%d min", (int)gProgress.minutes));
+            line("Best rank", gProgress.bestRank <= 4 ? kRankLetter[gProgress.bestRank] : "-");
+            line("Unlocked", TextFormat("%d of %d", UnlockedCount(), kItemCount));
+            y += 8;
+            const bool armed = gScene.time < gResetArmedUntil;
+            if (Button(x0, y, 170, 20, armed ? "Click again to erase it all" : "Reset progress", armed ? 2 : 0)) {
+                if (armed) {   // forgets unlocks and lifetime numbers; songs and their best ranks stay
+                    gProgress = Progress();
+                    gResetArmedUntil = -1.0f;
+                    CheckEquipped();
+                    BuildCat(gCfg.cat);
+                    SaveProgress();
+                } else {
+                    gResetArmedUntil = gScene.time + 3.0f;
+                }
+            }
+            break;
+        }
+    }
+
+    if (Button(right - 90, top + ph - 32, 90, 22, "Done", 1) || Key(KEY_ESCAPE)) {
+        SaveSettings();
+        gState = gSettingsFrom;
     }
 }
 
@@ -3298,7 +3927,9 @@ static void DrawFrame(double t)
             DrawHud(t);
             Text(TextFormat("%d", (int)std::ceil(gCountdown)), gVW / 2, gVH / 2 - 60, 50, kInk);
             break;
-        case ST_RESULTS: DrawResults(); break;
+        case ST_RESULTS:  DrawResults(); break;
+        case ST_WARDROBE: DrawWardrobe(); break;
+        case ST_SETTINGS: DrawSettings(); break;
     }
 }
 
@@ -3350,8 +3981,9 @@ int main(int argc, char** argv)
     // <audio file>                    start with that song loaded
     // --selftest                      analysis and sound check, no window
     // --sfx-demo <wav>                writes a short audition of the sound effects
-    // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2] [--scenery 0..5]
-    //              [--variant 0..2] [--cat 0..6] [--closeup]
+    // --shot <png> [--view menu|ready|play|pause|results|wardrobe|settings] [--at <seconds>] [--size WxH]
+    //              [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n]
+    //              [--tab 0..3] [--closeup] [--unlock-all] [--count]
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
     std::string songPath;
@@ -3368,6 +4000,12 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--scenery") && i + 1 < argc) shotScenery = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cat") && i + 1 < argc) shotCat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--variant") && i + 1 < argc) gForceVariant = std::clamp(atoi(argv[++i]), 0, 2);
+        else if (!strcmp(argv[i], "--hat") && i + 1 < argc) gCfg.hat = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--neck") && i + 1 < argc) gCfg.neck = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--back") && i + 1 < argc) gCfg.back = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--tab") && i + 1 < argc) gWardrobeTab = gSettingsTab = std::clamp(atoi(argv[++i]), 0, 3);
+        else if (!strcmp(argv[i], "--unlock-all")) gUnlockAll = true;
+        else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--closeup")) gCloseup = true;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &winW, &winH);
         else if (argv[i][0] != '-') songPath = argv[i];
@@ -3391,6 +4029,7 @@ int main(int argc, char** argv)
         gPlayer.hasStream = true;
         LoadSettings();
         LoadLibrary();
+        LoadProgress();
         PlatformStartKeyInput(GetWindowHandle());
     } else {
         if (shotDiff >= 0) gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
@@ -3415,6 +4054,7 @@ int main(int argc, char** argv)
         gMenuSel = 1;
     }
 
+    if (!gSim || !gUnlockAll) CheckEquipped();
     gCfg.cat = std::clamp(gCfg.cat, 0, kCatCount - 1);
     BuildShapes();
     BuildCat(gCfg.cat);
@@ -3430,7 +4070,9 @@ int main(int argc, char** argv)
     int shotFrames = 0, shotHold = -1;
     if (gSim) {
         gCfg.watch = true;
-        if (shotView != "menu") {
+        if (shotView == "wardrobe") gState = ST_WARDROBE;
+        else if (shotView == "settings") gState = ST_SETTINGS;
+        else if (shotView != "menu") {
             BeginLoad(songPath, songPath.empty());
             FinishLoad();
             if (gState != ST_READY) printf("load failed: %s\n", gError.c_str());
@@ -3447,7 +4089,9 @@ int main(int argc, char** argv)
             // Wait until this frame is due: up to 120 a second while playing, 60 in
             // menus, 30 when the window is in the background.
             const bool playing = gState == ST_PLAYING || gState == ST_COUNTDOWN;
-            const int cap = !IsWindowFocused() ? 30 : std::min(refresh, playing ? 120 : 60);
+            const int most = gCfg.fps == 0 ? 60 : gCfg.fps == 1 ? 120 : 240;
+            const int cap = !IsWindowFocused() ? 30 : std::min(refresh, playing ? most : 60);
+            gPlayer.gain.store(gCfg.music / 10.0f, std::memory_order_relaxed);
             nextFrame += 1.0 / cap;
             double now = NowSeconds();
             if (nextFrame < now - 0.05) nextFrame = now;   // fell behind: start over instead of catching up
@@ -3509,7 +4153,7 @@ int main(int argc, char** argv)
             shotFrames++;
             if (shotHold < 0) {
                 const bool timed = shotView == "play" || shotView == "pause" || shotView == "results";
-                if (gState == ST_MENU || !timed ? shotFrames >= 180 : gSimTime >= shotAt) {
+                if (gState == ST_MENU || gState == ST_WARDROBE || gState == ST_SETTINGS || !timed ? shotFrames >= 180 : gSimTime >= shotAt) {
                     if (shotView == "pause") { gPausedAt = t; gState = ST_PAUSED; shotHold = 40; }
                     else if (shotView == "results") { FinishGame(); shotHold = 90; }
                     else shotHold = 0;
