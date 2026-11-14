@@ -14,15 +14,31 @@ const double kC4 = 261.63, kC5 = 523.25, kE5 = 659.25, kG5 = 783.99, kC6 = 1046.
 struct Partial { double ratio, amp, decay; };
 
 // A struck or plucked tone: decaying sine partials behind a soft attack.
+// Each partial is a rotating phasor with a decaying amplitude, so the inner
+// loop is a handful of multiplies and no calls to sin or exp.
 void AddTone(std::vector<float>& out, double start, double freq, double gain, const Partial* parts, int count, double attack = 0.004)
 {
     const size_t first = (size_t)(start * kSfxRate);
-    for (size_t i = first; i < out.size(); i++) {
-        const double t = (double)(i - first) / kSfxRate;
-        double v = 0.0;
-        for (int p = 0; p < count; p++)
-            v += parts[p].amp * std::sin(kTau * freq * parts[p].ratio * t) * std::exp(-t * parts[p].decay);
-        out[i] += (float)(v * gain * (1.0 - std::exp(-t / attack)));
+    if (first >= out.size()) return;
+    const size_t n = out.size() - first;
+    std::vector<double> sum(n, 0.0);
+    for (int p = 0; p < count; p++) {
+        const double w = kTau * freq * parts[p].ratio / kSfxRate;
+        const double cw = std::cos(w), sw = std::sin(w), fade = std::exp(-parts[p].decay / kSfxRate);
+        double s = 0.0, c = 1.0, amp = parts[p].amp;
+        for (size_t i = 0; i < n; i++) {
+            sum[i] += amp * s;
+            const double next = s * cw + c * sw;
+            c = c * cw - s * sw;
+            s = next;
+            amp *= fade;
+        }
+    }
+    const double rise = std::exp(-1.0 / (attack * kSfxRate));
+    double closed = 1.0;   // 1 - attack envelope
+    for (size_t i = 0; i < n; i++) {
+        out[first + i] += (float)(sum[i] * gain * (1.0 - closed));
+        closed *= rise;
     }
 }
 

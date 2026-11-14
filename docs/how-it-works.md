@@ -92,6 +92,21 @@ Screen-space effects are drawn after the 3D pass: streaks radiating from the pro
 
 `oniria.songs`, next to the executable, holds one tab-separated line per song: path, name, length, and best accuracy and score for each difficulty. A song moves to the top when it is loaded. Results are only recorded when a person played (not in watch mode). The built-in track has an entry too, under a placeholder key.
 
+## The cat
+
+All seven cats are the same skeleton built by `BuildCat` from a small description: a coat pattern (solid, tabby, tuxedo, calico, point), six colours and three proportions. The shapes are rebuilt when the player picks another cat; nothing is stored per cat.
+
+Body, head, legs and tail are lofts: a row of elliptical rings skinned into a closed surface. A colour callback decides each quad from its position along the loft and how high on the ring it sits, which is enough to express every coat: tabby stripes are alternate spans on the upper faces, a tuxedo is the underside and the front of the chest, calico patches come from a hash of the quad, and siamese points are the last spans of the head plus the legs and tail.
+
+The parts are modelled around their own joints so they can be posed: the head around the neck, each leg as a thigh and a shin with a paw, the tail as five tapering segments. Walking moves diagonal pairs of legs together and lifts each paw as its leg swings forward; a wave runs down the tail from base to tip. The cat is drawn with its shading pulled partly towards its true colours, and the scene's light comes from ahead of it, so its face is never in shadow.
+
+## Staying light
+
+- **Frame pacing.** The game sleeps on a high-resolution waitable timer until the next frame is due: 120 frames a second while playing, 60 in menus, 30 in the background, and no drawing at all while minimized. V-sync is still requested, but it is not relied on: a driver can switch it off, and the first measurement of the menu showed the loop spinning more than a whole core for exactly that reason. raylib's own limiter was avoided because it busy-waits part of every frame.
+- **Memory.** A song is decoded once into 16-bit stereo and that buffer is used directly for playback; it is never copied. The analysis reads it in place through a sliding window instead of first building a mono copy of the whole track.
+- **Startup.** Sound effects are synthesized with phasor recurrences rather than calling `sin` and `exp` per sample.
+- **Drawing.** A few thousand flat triangles lit on the CPU, into a 640x360 canvas, in a handful of batches. No textures, no model files, no custom shaders.
+
 ## Sound effects
 
 `src/sfx.cpp` builds eight short sounds at startup from decaying sine partials: a marimba bar, a pitch-sliding "bloop", a kalimba tine, a small bell with two detuned fundamentals, a two-note music-box twinkle, a muted thud for misses, a music-box arpeggio for milestones and a menu tick. Each one goes through a low-pass filter around 5.5 kHz and gets a quiet, darker two-tap echo, which is what keeps them soft.
@@ -118,4 +133,4 @@ Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results] [--at seconds] [--diff 0..2] [--scenery 0..5] [--cat 0..6] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.

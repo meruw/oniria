@@ -66,6 +66,24 @@ bool PlatformReadFile(const std::string& utf8Path, std::vector<uint8_t>& out)
     return ok;
 }
 
+bool PlatformWindowMinimized(void* window) { return window && IsIconic((HWND)window) != 0; }
+
+void PlatformSleep(double seconds)
+{
+    if (seconds <= 0.0) return;
+    // A high-resolution waitable timer sleeps precisely, so no busy-waiting is needed to hit a frame time.
+    static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    if (timer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)(seconds * 1e7);   // relative, in 100 ns units
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(timer, INFINITE);
+            return;
+        }
+    }
+    Sleep((DWORD)(seconds * 1000.0));
+}
+
 // ---------------------------------------------------------------------------
 // Raw keyboard input on its own thread
 // ---------------------------------------------------------------------------
@@ -192,6 +210,7 @@ int PlatformPollKeys(LaneKeyEvent* out, int maxEvents)
 #include "platform.h"
 
 #include <cstdio>
+#include <thread>
 
 bool PlatformOpenAudioDialog(void*, std::string&) { return false; }
 
@@ -209,6 +228,13 @@ bool PlatformReadFile(const std::string& utf8Path, std::vector<uint8_t>& out)
     }
     fclose(f);
     return ok;
+}
+
+bool PlatformWindowMinimized(void*) { return false; }
+
+void PlatformSleep(double seconds)
+{
+    if (seconds > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
 }
 
 bool PlatformStartKeyInput(void*) { return false; }

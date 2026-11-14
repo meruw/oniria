@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 
 namespace {
@@ -147,17 +148,16 @@ bool AnalyzeSong(const int16_t* pcm, size_t frames, int channels, int sampleRate
     const size_t n = frames / (size_t)dec;
     if (n < (size_t)kFftSize * 8) return false;
 
-    std::vector<float> x(n);
-    {
-        const float scale = 1.0f / (32768.0f * (float)dec * (float)channels);
-        const int span = dec * channels;
-        const int16_t* p = pcm;
-        for (size_t i = 0; i < n; i++, p += span) {
-            int sum = 0;
-            for (int j = 0; j < span; j++) sum += p[j];
-            x[i] = (float)sum * scale;
-        }
-    }
+    // Only one analysis window of mono audio exists at a time; the song itself is read in place.
+    const float scale = 1.0f / (32768.0f * (float)dec * (float)channels);
+    const int span = dec * channels;
+    auto mono = [&](size_t i) {
+        const int16_t* p = pcm + i * (size_t)span;
+        int sum = 0;
+        for (int j = 0; j < span; j++) sum += p[j];
+        return (float)sum * scale;
+    };
+    std::vector<float> frame(kFftSize);
 
     const double fs = (double)sampleRate / dec;
     const int hop = std::max(64, (int)std::lround(fs * 0.008));
@@ -192,8 +192,12 @@ bool AnalyzeSong(const int16_t* pcm, size_t frames, int channels, int sampleRate
 
     std::vector<float> re(kFftSize), im(kFftSize), prev(kFftHalf, 0.0f);
     for (size_t f = 0; f < nf; f++) {
-        const float* src = x.data() + f * (size_t)hop;
-        for (int i = 0; i < kFftSize; i++) { re[rev[i]] = src[i] * window[i]; }
+        // Slide the window along: keep the overlap, mix down only the new samples.
+        const size_t start = f * (size_t)hop;
+        const int fresh = f == 0 || hop >= kFftSize ? kFftSize : hop;
+        if (fresh < kFftSize) memmove(frame.data(), frame.data() + fresh, (size_t)(kFftSize - fresh) * sizeof(float));
+        for (int i = kFftSize - fresh; i < kFftSize; i++) frame[i] = mono(start + (size_t)i);
+        for (int i = 0; i < kFftSize; i++) { re[rev[i]] = frame[i] * window[i]; }
         std::fill(im.begin(), im.end(), 0.0f);
 
         for (int size = 2; size <= kFftSize; size <<= 1) {

@@ -71,6 +71,7 @@ struct Settings {
     bool  hints    = true;    // show the key above each object
     int   sfx      = 7;       // sound effects volume, 0..10
     int   scenery  = 0;       // 0 = a journey through every place, 1.. = stay in one
+    int   cat      = 0;       // which cat is walking
 };
 static Settings gCfg;
 
@@ -90,6 +91,7 @@ static void LoadSettings()
         else if (!strcmp(key, "hints")) gCfg.hints = v != 0.0f;
         else if (!strcmp(key, "sfx")) gCfg.sfx = std::clamp((int)v, 0, 10);
         else if (!strcmp(key, "scenery")) gCfg.scenery = std::clamp((int)v, 0, 5);
+        else if (!strcmp(key, "cat")) gCfg.cat = std::max(0, (int)v);
     }
     fclose(f);
 }
@@ -98,8 +100,8 @@ static void SaveSettings()
 {
     FILE* f = fopen(ConfigPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\nscenery=%d\n",
-            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx, gCfg.scenery);
+    fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\nscenery=%d\ncat=%d\n",
+            gCfg.diff, gCfg.speed, gCfg.offsetMs, gCfg.watch ? 1 : 0, gCfg.hints ? 1 : 0, gCfg.sfx, gCfg.scenery, gCfg.cat);
     fclose(f);
 }
 
@@ -192,8 +194,16 @@ static void RememberSong(const std::string& path, const std::string& name, float
 // audio thread. Each callback stamps (position, time) so the game can tell
 // exactly where playback is between callbacks.
 
+// Decoded stereo 16-bit audio. Owns its buffer, which comes straight from the
+// decoder, so a song is never held in memory twice.
+struct Pcm {
+    int16_t* data = nullptr;
+    size_t   frames = 0;
+    void Free() { if (data) MemFree(data); data = nullptr; frames = 0; }
+};
+
 struct Player {
-    std::vector<int16_t> pcm;   // stereo interleaved
+    Pcm      pcm;               // stereo interleaved
     std::atomic<int> sampleRate{ 48000 };
     int64_t  frames = 0;
     std::mutex mutex;           // guards pcm/frames/pos against song swaps and seeks
@@ -264,7 +274,7 @@ static void FeedAudio(void* buffer, unsigned int frames)
     if (gPlayer.playing.load(std::memory_order_relaxed) && gPlayer.mutex.try_lock()) {
         const int64_t pos = gPlayer.pos.load(std::memory_order_relaxed);
         StampLocked(pos);
-        const int16_t* data = gPlayer.pcm.data();
+        const int16_t* data = gPlayer.pcm.data;
         const int64_t total = gPlayer.frames;
         const float k = 0.9f / 32768.0f;   // a little headroom for the effects on top
         for (unsigned int i = 0; i < frames; i++) {
@@ -373,7 +383,7 @@ struct LoadJob {
     std::atomic<int> stage{ 0 };   // 0 idle, 1 decoding, 2 analyzing, 3 finished
     bool ok = false;
     std::string error, name, path;
-    std::vector<int16_t> pcm;
+    Pcm pcm;
     int sampleRate = 0;
     SongAnalysis song;
 };
@@ -566,6 +576,44 @@ static void AddBeam(Shape& s, Vector3 a, Vector3 b, float half, Vector3 col)
     Orient(s, from, Vector3Scale(Vector3Add(a, b), 0.5f));
 }
 
+// One cross-section of a lofted shape: an ellipse around `c`.
+struct LoftRing { Vector3 c; float ru, rv; };
+
+// Skins a row of rings into a closed surface. `u` and `v` are the axes each
+// ring is drawn in. `colour(span, side, lift)` picks the colour of each quad;
+// lift runs from -1 on the -v side to 1 on the +v side.
+template <class Colour>
+static void AddLoft(Shape& s, const LoftRing* rings, int count, int sides, Vector3 u, Vector3 v, Colour colour)
+{
+    auto point = [&](const LoftRing& r, float a) {
+        return Vector3Add(r.c, Vector3Add(Vector3Scale(u, r.ru * cosf(a)), Vector3Scale(v, r.rv * sinf(a))));
+    };
+    auto face = [&](Vector3 a, Vector3 b, Vector3 c, Vector3 inside, Vector3 col) {   // wound to face away from `inside`
+        const Vector3 n = Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a));
+        const Vector3 mid = Vector3Scale(Vector3Add(Vector3Add(a, b), c), 1.0f / 3.0f);
+        if (Vector3DotProduct(n, Vector3Subtract(mid, inside)) < 0.0f) std::swap(b, c);
+        s.push_back({ a, b, c, col });
+    };
+    for (int i = 0; i + 1 < count; i++) {
+        const Vector3 axis = Vector3Lerp(rings[i].c, rings[i + 1].c, 0.5f);
+        for (int k = 0; k < sides; k++) {
+            const float a0 = 2 * kPi * k / sides, a1 = 2 * kPi * (k + 1) / sides;
+            const Vector3 col = colour(i, k, sinf((a0 + a1) * 0.5f));
+            const Vector3 p00 = point(rings[i], a0), p01 = point(rings[i], a1), p10 = point(rings[i + 1], a0), p11 = point(rings[i + 1], a1);
+            face(p00, p10, p11, axis, col);
+            face(p00, p11, p01, axis, col);
+        }
+    }
+    for (int end = 0; end < 2; end++) {   // caps
+        const LoftRing& r = rings[end ? count - 1 : 0];
+        const Vector3 inside = rings[end ? count - 2 : 1].c;
+        for (int k = 0; k < sides; k++) {
+            const float a0 = 2 * kPi * k / sides, a1 = 2 * kPi * (k + 1) / sides;
+            face(r.c, point(r, a0), point(r, a1), inside, colour(end ? count - 2 : 0, k, sinf((a0 + a1) * 0.5f)));
+        }
+    }
+}
+
 static void AddShape(Shape& dst, const Shape& src, Matrix m)
 {
     for (const Tri& t : src)
@@ -591,7 +639,7 @@ static void EmitTri(Vector3 a, Vector3 b, Vector3 c, Vector3 col, float glow = 0
 {
     const Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
     const float ndl = std::max(0.0f, Vector3DotProduct(n, gLight.lightDir));
-    const float sky = 0.65f + 0.35f * n.y;
+    const float sky = 0.72f + 0.28f * n.y + 0.16f * std::max(0.0f, -n.y);   // sky from above, a little bounce from the ground
     float r = col.x * (gLight.ambient.x * sky + gLight.sun.x * ndl * 0.72f);
     float g = col.y * (gLight.ambient.y * sky + gLight.sun.y * ndl * 0.72f);
     float bl = col.z * (gLight.ambient.z * sky + gLight.sun.z * ndl * 0.72f);
@@ -648,7 +696,7 @@ static void UpdateCanvas()
 // Shapes
 // ---------------------------------------------------------------------------
 
-static Shape sCatBody, sCatHead, sCatEyes, sCatLeg, sCatTail, sCatTailTip;
+static Shape sCatBody, sCatHead, sCatEyes, sCatThigh[2], sCatShin[2], sCatTail[5];   // [0] front leg, [1] hind leg; rebuilt by BuildCat
 static Shape sLog, sYarn, sWing, sButterflyBody, sBellStalk, sBell;
 static Shape sTrunk, sCrown, sPine, sBush, sRock, sFlower, sMushroom, sHouse, sWindows, sLampPost, sLamp;
 static Shape sSpark, sShadow, sHalo, sStar, sHeart, sRing, sRingUp, sCatBlush;
@@ -659,27 +707,7 @@ static const Vector3 kActionColor[ACT_COUNT] = { { 0.93f, 0.62f, 0.33f }, { 0.95
 
 static void BuildShapes()
 {
-    const Vector3 fur = Rgb(240, 160, 84), furDark = Rgb(206, 120, 58), cream = Rgb(255, 244, 226), pink = Rgb(250, 160, 170), ink = Rgb(52, 40, 52);
-
-    // Cat, facing +x. Each part is modelled around its own pivot.
-    AddBlob(sCatBody, { 0, 0, 0 }, { 0.52f, 0.30f, 0.27f }, fur);
-    AddBlob(sCatBody, { 0.30f, -0.08f, 0 }, { 0.22f, 0.20f, 0.20f }, cream);
-    AddBox(sCatBody, { -0.20f, 0.20f, 0 }, { 0.05f, 0.06f, 0.20f }, furDark);
-    AddBox(sCatBody, { 0.02f, 0.21f, 0 }, { 0.05f, 0.06f, 0.21f }, furDark);
-
-    AddBlob(sCatHead, { 0, 0, 0 }, { 0.36f, 0.32f, 0.36f }, fur);
-    AddBlob(sCatHead, { 0.24f, -0.10f, 0 }, { 0.15f, 0.12f, 0.20f }, cream);
-    AddBox(sCatHead, { 0.385f, -0.05f, 0 }, { 0.03f, 0.025f, 0.04f }, pink);
-    for (int side = -1; side <= 1; side += 2) {
-        AddCone(sCatHead, { -0.04f, 0.20f, side * 0.21f }, 0.15f, 0.30f, 4, fur, kPi / 4);
-        AddCone(sCatHead, { 0.0f, 0.22f, side * 0.21f }, 0.085f, 0.19f, 4, pink, kPi / 4);
-        AddBox(sCatEyes, { 0.30f, 0.0f, side * 0.17f }, { 0.04f, 0.065f, 0.045f }, ink);   // modelled around eye height
-    }
-
-    AddBox(sCatLeg, { 0, -0.15f, 0 }, { 0.062f, 0.16f, 0.062f }, fur);
-    AddBox(sCatLeg, { 0.01f, -0.34f, 0 }, { 0.072f, 0.055f, 0.068f }, cream);
-    AddBox(sCatTail, { 0, 0.16f, 0 }, { 0.05f, 0.17f, 0.05f }, fur);
-    AddBox(sCatTailTip, { 0, 0.14f, 0 }, { 0.055f, 0.15f, 0.055f }, cream);
+    const Vector3 cream = Rgb(255, 244, 226), ink = Rgb(52, 40, 52);
 
     // Things on the path.
     {
@@ -754,8 +782,6 @@ static void BuildShapes()
         sRing.push_back({ o0, o1, i1, Rgb(255, 255, 255) });
         sRing.push_back({ o0, i1, i0, Rgb(255, 255, 255) });
     }
-    for (int side = -1; side <= 1; side += 2)
-        AddBox(sCatBlush, { 0.27f, -0.07f, side * 0.24f }, { 0.035f, 0.04f, 0.05f }, Rgb(255, 150, 165));
     for (int i = 0; i < 14; i++) {
         const float a0 = 2 * kPi * i / 14, a1 = 2 * kPi * (i + 1) / 14;
         const Vector3 o0 = { cosf(a0), sinf(a0), 0 }, o1 = { cosf(a1), sinf(a1), 0 };
@@ -863,6 +889,164 @@ static void BuildShapes()
 // ---------------------------------------------------------------------------
 // World
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Cats
+// ---------------------------------------------------------------------------
+// Seven cats share one skeleton. Each has a coat pattern, colours and a few
+// proportions; the shapes are rebuilt when the player picks another.
+
+enum CatPattern { PAT_SOLID, PAT_TABBY, PAT_TUXEDO, PAT_CALICO, PAT_POINT };
+
+struct CatKind {
+    const char* name;
+    const char* note;
+    int     pattern;
+    Vector3 base, mark, mark2, light, eye, collar;
+    float   chub, ear, fluff;   // body width, ear height, tail and cheek fur
+};
+
+static const CatKind kCats[] = {
+    { "Mango",    "orange tabby", PAT_TABBY,  Rgb(240, 160, 84),  Rgb(206, 118, 56),  Rgb(206, 118, 56), Rgb(255, 244, 226), Rgb(110, 190, 120), Rgb(80, 186, 190),  1.00f, 1.00f, 1.0f },
+    { "Domino",   "tuxedo",       PAT_TUXEDO, Rgb(60, 56, 72),    Rgb(46, 42, 58),    Rgb(46, 42, 58),   Rgb(252, 248, 240), Rgb(250, 214, 90),  Rgb(232, 96, 100),  1.00f, 1.05f, 1.0f },
+    { "Mochi",    "calico",       PAT_CALICO, Rgb(252, 246, 236), Rgb(236, 150, 80),  Rgb(104, 84, 86),  Rgb(255, 250, 242), Rgb(240, 180, 80),  Rgb(244, 140, 170), 1.06f, 0.95f, 1.0f },
+    { "Luna",     "siamese",      PAT_POINT,  Rgb(240, 226, 202), Rgb(104, 78, 76),   Rgb(104, 78, 76),  Rgb(250, 240, 222), Rgb(110, 184, 244), Rgb(176, 150, 230), 0.94f, 1.15f, 1.0f },
+    { "Pebble",   "british blue", PAT_SOLID,  Rgb(142, 152, 174), Rgb(120, 130, 152), Rgb(120, 130, 152), Rgb(196, 204, 220), Rgb(244, 166, 76), Rgb(250, 212, 100), 1.18f, 0.80f, 1.0f },
+    { "Cloud",    "fluffy white", PAT_SOLID,  Rgb(250, 250, 252), Rgb(226, 228, 238), Rgb(226, 228, 238), Rgb(255, 255, 255), Rgb(120, 190, 240), Rgb(120, 196, 236), 1.10f, 0.90f, 1.8f },
+    { "Midnight", "black cat",    PAT_SOLID,  Rgb(52, 48, 66),    Rgb(40, 36, 52),    Rgb(40, 36, 52),   Rgb(84, 80, 100),   Rgb(196, 232, 96),  Rgb(170, 120, 230), 0.98f, 1.10f, 1.0f },
+};
+const int kCatCount = (int)(sizeof(kCats) / sizeof(kCats[0]));
+
+// Builds every part of the cat, facing +x with its feet on y = 0. Head, eyes,
+// legs and tail segments are modelled around their own joints so they can be posed.
+static void BuildCat(int kind)
+{
+    const CatKind& c = kCats[std::clamp(kind, 0, kCatCount - 1)];
+    sCatBody.clear(); sCatHead.clear(); sCatEyes.clear(); sCatBlush.clear();
+    for (Shape& s : sCatThigh) s.clear();
+    for (Shape& s : sCatShin) s.clear();
+    for (Shape& s : sCatTail) s.clear();
+
+    const Vector3 X = { 1, 0, 0 }, Y = { 0, 1, 0 }, Z = { 0, 0, 1 };
+    const Vector3 pink = Rgb(250, 160, 170), ink = Rgb(44, 34, 46), white = { 1, 1, 1 };
+    const Vector3 belly = c.pattern == PAT_SOLID ? Mix(c.base, c.light, 0.45f) : c.light;
+    const float w = c.chub;
+
+    // Body: rump, haunches, waist, ribs, chest, neck.
+    const LoftRing body[7] = {
+        { { -0.50f, 0.52f, 0 }, 0.07f * w, 0.09f },
+        { { -0.40f, 0.52f, 0 }, 0.21f * w, 0.23f },
+        { { -0.22f, 0.51f, 0 }, 0.25f * w, 0.27f },
+        { { -0.02f, 0.50f, 0 }, 0.23f * w, 0.25f },
+        { {  0.17f, 0.52f, 0 }, 0.24f * w, 0.26f },
+        { {  0.32f, 0.56f, 0 }, 0.22f * w, 0.24f },
+        { {  0.44f, 0.63f, 0 }, 0.14f, 0.15f },
+    };
+    AddLoft(sCatBody, body, 7, 8, Z, Y, [&](int span, int side, float lift) -> Vector3 {
+        const bool top = lift > 0.3f, under = lift < -0.5f;
+        switch (c.pattern) {
+            case PAT_TABBY:  return under ? c.light : (top && (span & 1)) ? c.mark : c.base;
+            case PAT_TUXEDO: return under || (span >= 4 && lift < 0.2f) ? c.light : c.base;
+            case PAT_CALICO: {
+                if (under) return c.light;
+                const uint32_t patch = Hash(span * 7 + 3, side / 2) % 6;
+                return patch < 2 ? c.mark : patch == 2 ? c.mark2 : c.base;
+            }
+            case PAT_POINT:  return under ? c.light : span == 0 ? Mix(c.base, c.mark, 0.5f) : c.base;
+            default:         return under ? belly : c.base;
+        }
+    });
+    // A collar with a little bell.
+    const LoftRing collar[2] = { { { 0.345f, 0.575f, 0 }, 0.205f * w + 0.014f, 0.236f }, { { 0.40f, 0.607f, 0 }, 0.168f * w + 0.014f, 0.198f } };
+    AddLoft(sCatBody, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return c.collar; });
+    AddBlob(sCatBody, { 0.41f, 0.40f, 0 }, { 0.045f, 0.045f, 0.045f }, Rgb(250, 214, 92));
+
+    // Head, around the neck joint: wide cheeks, a short muzzle.
+    const float hw = 1.0f + (c.chub - 1.0f) * 0.6f + (c.fluff - 1.0f) * 0.12f;
+    const LoftRing head[7] = {
+        { { -0.18f, 0.03f, 0 }, 0.16f, 0.15f },
+        { { -0.06f, 0.04f, 0 }, 0.31f * hw, 0.28f },
+        { {  0.09f, 0.04f, 0 }, 0.37f * hw, 0.32f },
+        { {  0.22f, 0.02f, 0 }, 0.33f * hw, 0.28f },
+        { {  0.31f, -0.01f, 0 }, 0.23f * hw, 0.20f },
+        { {  0.355f, -0.05f, 0 }, 0.15f, 0.115f },
+        { {  0.385f, -0.065f, 0 }, 0.09f, 0.07f },
+    };
+    AddLoft(sCatHead, head, 7, 8, Z, Y, [&](int span, int side, float lift) -> Vector3 {
+        const bool muzzle = span >= 4, face = span == 3;
+        switch (c.pattern) {
+            case PAT_TABBY:
+                if (muzzle) return lift < 0.6f ? c.light : c.base;
+                if (face) return lift < -0.2f ? c.light : c.base;
+                return (lift > 0.3f && span == 1) ? c.mark : c.base;
+            case PAT_TUXEDO:
+                if (muzzle) return c.light;
+                return (face && lift < 0.0f) || (span == 2 && lift < -0.5f) ? c.light : c.base;
+            case PAT_CALICO: {
+                if (muzzle || (face && lift < 0.0f)) return c.light;
+                const uint32_t patch = Hash(span * 5 + 11, side / 2) % 5;
+                return patch < 2 ? c.mark : patch == 2 ? c.mark2 : c.base;
+            }
+            case PAT_POINT:  return span >= 3 ? c.mark : span == 2 ? Mix(c.base, c.mark, 0.4f) : c.base;
+            default:         return muzzle && lift < 0.4f ? belly : c.base;
+        }
+    });
+    AddBlob(sCatHead, { 0.40f, -0.055f, 0 }, { 0.03f, 0.024f, 0.042f }, c.pattern == PAT_POINT ? Rgb(84, 60, 64) : pink);   // nose
+    for (int side = -1; side <= 1; side += 2) {
+        const float z = (float)side;
+        // Ear: a three-sided pyramid with a pink panel on its front face.
+        const Vector3 tip = { -0.02f, 0.30f + 0.17f * c.ear, z * 0.29f * hw };
+        const Vector3 a = { 0.13f, 0.24f, z * 0.12f }, b = { 0.04f, 0.15f, z * 0.37f * hw }, d = { -0.13f, 0.21f, z * 0.24f };
+        const Vector3 centre = Vector3Scale(Vector3Add(Vector3Add(a, b), Vector3Add(d, tip)), 0.25f);
+        const Vector3 fur = c.pattern == PAT_POINT || c.pattern == PAT_TABBY ? c.mark : c.pattern == PAT_CALICO ? (side < 0 ? c.mark : c.mark2) : c.base;
+        const size_t from = sCatHead.size();
+        sCatHead.push_back({ a, b, tip, fur });
+        sCatHead.push_back({ b, d, tip, fur });
+        sCatHead.push_back({ d, a, tip, fur });
+        const Vector3 front = Vector3Scale(Vector3Add(Vector3Add(a, b), tip), 1.0f / 3.0f);
+        auto inset = [&](Vector3 p) { return Vector3Add(Vector3Lerp(p, front, 0.32f), Vector3{ 0.014f, 0.004f, 0 }); };
+        sCatHead.push_back({ inset(a), inset(b), inset(tip), pink });
+        Orient(sCatHead, from, centre);
+        if (c.fluff > 1.3f) AddBlob(sCatHead, { 0.12f, -0.15f, z * 0.33f * hw }, { 0.11f, 0.09f, 0.09f }, c.light);   // cheek fur
+
+        // Big eyes: iris, pupil and a highlight. Modelled around eye height so they can close.
+        AddBlob(sCatEyes, { 0.285f, 0.0f, z * 0.215f * hw }, { 0.060f, 0.098f, 0.074f }, c.eye);
+        AddBlob(sCatEyes, { 0.318f, 0.0f, z * 0.22f * hw }, { 0.040f, 0.078f, 0.050f }, ink);
+        AddBox(sCatEyes, { 0.356f, 0.04f, z * 0.22f * hw + 0.02f }, { 0.012f, 0.02f, 0.015f }, white);
+        AddBox(sCatBlush, { 0.25f, -0.09f, z * 0.30f * hw }, { 0.03f, 0.034f, 0.05f }, Rgb(255, 150, 165));
+    }
+
+    // Legs hang from their joints: a thigh, then a shin ending in a paw.
+    const Vector3 thighCol[2] = { c.base, c.pattern == PAT_CALICO ? c.mark2 : c.base };
+    const Vector3 shinCol = c.pattern == PAT_TUXEDO || c.pattern == PAT_CALICO ? c.light : c.pattern == PAT_POINT ? c.mark : c.base;
+    const Vector3 pawCol = c.pattern == PAT_POINT ? c.mark : c.pattern == PAT_SOLID ? belly : c.light;
+    const LoftRing frontThigh[3] = { { { 0, 0.03f, 0 }, 0.082f, 0.074f }, { { 0, -0.08f, 0 }, 0.074f, 0.068f }, { { 0, -0.17f, 0 }, 0.060f, 0.058f } };
+    const LoftRing hindThigh[3] = { { { 0, 0.05f, 0 }, 0.120f, 0.090f }, { { -0.01f, -0.08f, 0 }, 0.102f, 0.080f }, { { 0, -0.17f, 0 }, 0.064f, 0.060f } };
+    const LoftRing shin[2] = { { { 0, 0.01f, 0 }, 0.060f, 0.057f }, { { 0, -0.11f, 0 }, 0.052f, 0.052f } };
+    for (int leg = 0; leg < 2; leg++) {
+        const Vector3 col = thighCol[leg];
+        AddLoft(sCatThigh[leg], leg ? hindThigh : frontThigh, 3, 6, X, Z, [&](int span, int, float) -> Vector3 {
+            return c.pattern == PAT_TABBY && span == 0 && leg == 1 ? c.mark : col;
+        });
+        AddLoft(sCatShin[leg], shin, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return shinCol; });
+        AddBlob(sCatShin[leg], { 0.03f, -0.155f, 0 }, { 0.084f, 0.048f, 0.07f }, pawCol);
+    }
+
+    // Tail: five tapering segments, each around the joint at its base.
+    for (int i = 0; i < 5; i++) {
+        auto radius = [&](int k) {
+            const float taper = 0.062f - 0.008f * k;
+            return c.fluff > 1.3f ? taper * (1.0f + 0.9f * sinf(kPi * (k + 0.6f) / 5.6f)) : taper;
+        };
+        const LoftRing seg[2] = { { { 0, 0, 0 }, radius(i), radius(i) }, { { 0, 0.21f, 0 }, radius(i + 1), radius(i + 1) } };
+        Vector3 col = c.base;
+        if (c.pattern == PAT_TABBY) col = (i & 1) ? c.mark : c.base;
+        else if (c.pattern == PAT_TUXEDO) col = i == 4 ? c.light : c.base;
+        else if (c.pattern == PAT_CALICO) col = (i & 1) ? c.mark2 : c.mark;
+        else if (c.pattern == PAT_POINT) col = c.mark;
+        AddLoft(sCatTail[i], seg, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return col; });
+    }
+}
 
 // Sky top, sky bottom, sunlight, ambient light, grass, path, stars, lamps.
 static Palette DayKey(int i)
@@ -1047,9 +1231,13 @@ static void LoadWorker(std::string path, bool demo)
 {
     gJob.stage.store(1);
     gJob.error.clear();
-    gJob.pcm.clear();
+    gJob.pcm.Free();
     if (demo) {
-        SynthDemoTrack(gJob.pcm, gJob.sampleRate);
+        std::vector<int16_t> demoPcm;
+        SynthDemoTrack(demoPcm, gJob.sampleRate);
+        gJob.pcm.frames = demoPcm.size() / 2;
+        gJob.pcm.data = (int16_t*)MemAlloc((unsigned int)(demoPcm.size() * sizeof(int16_t)));
+        memcpy(gJob.pcm.data, demoPcm.data(), demoPcm.size() * sizeof(int16_t));
     } else {
         std::vector<uint8_t> bytes;
         std::string ext = GetFileExtension(path.c_str()) ? GetFileExtension(path.c_str()) : "";
@@ -1063,17 +1251,16 @@ static void LoadWorker(std::string path, bool demo)
                 gJob.error = "Could not decode that file. Try MP3, OGG or WAV.";
             } else {
                 WaveFormat(&wave, wave.sampleRate, 16, 2);
-                const int16_t* data = (const int16_t*)wave.data;
-                gJob.pcm.assign(data, data + (size_t)wave.frameCount * 2);
+                gJob.pcm.data = (int16_t*)wave.data;   // take the decoder's buffer instead of copying it
+                gJob.pcm.frames = wave.frameCount;
                 gJob.sampleRate = wave.sampleRate;
-                UnloadWave(wave);
             }
         }
     }
     if (gJob.error.empty()) {
         gJob.stage.store(2);
         gJob.song = SongAnalysis();
-        if (!AnalyzeSong(gJob.pcm.data(), gJob.pcm.size() / 2, 2, gJob.sampleRate, gJob.song))
+        if (!AnalyzeSong(gJob.pcm.data, gJob.pcm.frames, 2, gJob.sampleRate, gJob.song))
             gJob.error = "That track is too short to play.";
         else if (gJob.song.charts[DIFF_NORMAL].time.size() < 8)
             gJob.error = "Could not find enough rhythm in that track.";
@@ -1100,15 +1287,21 @@ static void FinishLoad()
     gJob.stage.store(0);
     if (!gJob.ok) {
         gError = gJob.error;
+        gJob.pcm.Free();
         gState = ST_MENU;
         return;
     }
     {
-        std::lock_guard<std::mutex> lock(gPlayer.mutex);
-        gPlayer.pcm.swap(gJob.pcm);
-        gPlayer.frames = (int64_t)(gPlayer.pcm.size() / 2);
+        Pcm previous;
+        {
+            std::lock_guard<std::mutex> lock(gPlayer.mutex);
+            previous = gPlayer.pcm;
+            gPlayer.pcm = gJob.pcm;
+            gPlayer.frames = (int64_t)gPlayer.pcm.frames;
+        }
+        gJob.pcm = Pcm();
+        previous.Free();   // the song that was loaded before
     }
-    gJob.pcm = std::vector<int16_t>();
     if (!gSim) {
         if (gPlayer.hasStream && gPlayer.sampleRate != gJob.sampleRate) {
             UnloadAudioStream(gPlayer.stream);
@@ -1668,6 +1861,7 @@ static void DrawSky(float horizonY)
 }
 
 static Camera3D gCamera;
+static bool gCloseup = false;      // screenshot option: bring the camera right up to the cat
 static float gViewCentre = 0.0f;   // world x at the middle of the screen
 static float gViewHalf = 5.3f;     // half the visible width of the path, in world units
 
@@ -1916,14 +2110,14 @@ static void DrawCat(float x, bool walking)
         case ACT_STUMBLE: roll = 0.35f * sinf(u * kPi * 4) * (1 - u); pitch = -0.15f * arc; break;
     }
     const float phase = x * 2.4f;
-    const float swing = walking && lift < 0.05f ? 0.55f * sinf(phase) : 0.0f;
+    const bool stepping = walking && lift < 0.05f;
     // A happy cat prances: a bigger bounce in its step, and a little hop on every beat.
-    const float bob = walking ? (0.035f + 0.06f * joy) * fabsf(cosf(phase)) + 0.06f * joy * gScene.beat : 0.0f;
+    const float bob = walking ? (0.03f + 0.06f * joy) * fabsf(cosf(phase)) + 0.06f * joy * gScene.beat : 0.0f;
     const float slope = atanf((PathHeight(x + 0.4f) - PathHeight(x - 0.4f)) / 0.8f);
 
     // The whole cat pivots around its back hips, so pitching up reads as standing.
     // It stretches upwards for an instant on every perfect hit.
-    const Vector3 hips = { -0.33f, 0.42f, 0.0f };
+    const Vector3 hips = { -0.30f, 0.38f, 0.0f };
     Matrix root = MatrixTranslate(-hips.x, -hips.y, -hips.z);
     root = MatrixMultiply(root, MatrixRotateX(roll));
     root = MatrixMultiply(root, MatrixRotateZ(pitch + slope * 0.7f));
@@ -1931,36 +2125,50 @@ static void DrawCat(float x, bool walking)
     root = MatrixMultiply(root, MatrixScale(kCatSize, kCatSize * (1.0f + 0.1f * gJoyKick), kCatSize));
     root = MatrixMultiply(root, MatrixTranslate(x, ground + lift + bob, 0.0f));
 
-    DrawShape(sCatBody, MatrixMultiply(MatrixTranslate(0, 0.62f, 0), root));
+    const Vector3 plain = { 1, 1, 1 };
+    const float lift2 = 0.22f;   // how far the cat's shading is pulled towards its true colours
+    DrawShape(sCatBody, root, plain, lift2);
 
     // The head stays roughly level, is turned a little towards the camera, and nods along when happy.
     Matrix head = MatrixRotateY(-0.35f);
     head = MatrixMultiply(head, MatrixRotateZ(-pitch * 0.55f + 0.05f * sinf(gScene.time * 1.3f) + 0.09f * joy * sinf(gScene.wag * 1.5f)));
-    head = MatrixMultiply(head, MatrixTranslate(0.52f, 1.0f + 0.02f * sinf(phase * 2), 0));
-    DrawShape(sCatHead, MatrixMultiply(head, root));
-    if (joy > 0.3f) DrawShape(sCatBlush, MatrixMultiply(head, root));
+    head = MatrixMultiply(MatrixScale(1.08f, 1.08f, 1.08f), head);
+    head = MatrixMultiply(head, MatrixTranslate(0.44f, 0.83f + 0.02f * sinf(phase * 2), 0));
+    head = MatrixMultiply(head, root);
+    DrawShape(sCatHead, head, plain, lift2);
+    if (joy > 0.3f) DrawShape(sCatBlush, head, plain, 0.5f);
     const bool blinking = fmodf(gScene.time, 3.7f) < 0.12f;
     const bool pleased = (gJudgeKind == J_PERFECT && gJudgeAge < 0.3f) || joy > 0.6f;   // eyes smile shut
-    const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.15f : pleased ? 0.4f : 1.0f, 1.0f), MatrixTranslate(0, 0.07f, 0));
-    DrawShape(sCatEyes, MatrixMultiply(MatrixMultiply(eyes, head), root));
+    const Matrix eyes = MatrixMultiply(MatrixScale(1.0f, blinking ? 0.12f : pleased ? 0.42f : 1.0f, 1.0f), MatrixTranslate(0, 0.05f, 0));
+    DrawShape(sCatEyes, MatrixMultiply(eyes, head), plain, 0.55f);
 
+    // Legs: diagonal pairs step together, and each paw lifts as its leg swings forward.
     for (int i = 0; i < 4; i++) {
         const bool front = i < 2, nearSide = (i & 1) == 0;
-        float a = swing * ((front == nearSide) ? 1.0f : -1.0f);
-        if (front) a += frontLegs + tuck * 1.0f + (nearSide ? paw : 0.0f);
-        else a -= tuck * 0.9f;
-        const Matrix leg = MatrixMultiply(MatrixRotateZ(a), MatrixTranslate(front ? 0.33f : -0.33f, 0.42f, nearSide ? 0.15f : -0.15f));
-        DrawShape(sCatLeg, MatrixMultiply(leg, root));
+        const float legPhase = phase + ((front == nearSide) ? 0.0f : kPi);
+        float upper = stepping ? 0.5f * sinf(legPhase) : 0.0f;
+        float lower = stepping ? -0.75f * std::max(0.0f, cosf(legPhase)) : 0.0f;
+        if (front) {
+            upper += frontLegs + tuck + (nearSide ? paw : 0.0f);
+            lower -= 0.8f * tuck + 0.3f * frontLegs + (nearSide ? 0.25f * paw : 0.0f);
+        } else {
+            upper -= tuck * 0.9f;
+            lower += 0.3f * tuck;
+        }
+        const Vector3 hip = front ? Vector3{ 0.26f, 0.37f, nearSide ? 0.14f : -0.14f } : Vector3{ -0.30f, 0.38f, nearSide ? 0.16f : -0.16f };
+        const Matrix thigh = MatrixMultiply(MatrixRotateZ(upper), MatrixTranslate(hip.x, hip.y, hip.z));
+        const Matrix shin = MatrixMultiply(MatrixMultiply(MatrixRotateZ(lower), MatrixTranslate(0, -0.17f, 0)), thigh);
+        DrawShape(sCatThigh[front ? 0 : 1], MatrixMultiply(thigh, root), plain, lift2);
+        DrawShape(sCatShin[front ? 0 : 1], MatrixMultiply(shin, root), plain, lift2);
     }
 
-    // The tail goes up and wags faster with the mood.
-    const float sway = (0.18f + 0.25f * joy) * sinf(gScene.wag) + 0.12f * gScene.beat;
-    const Matrix t1 = MatrixMultiply(MatrixRotateZ(0.95f - 0.4f * joy + sway), MatrixTranslate(-0.55f, 0.72f, 0));
-    const Matrix t2 = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.5f + sway), MatrixTranslate(0, 0.32f, 0)), t1);
-    const Matrix t3 = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.55f + sway), MatrixTranslate(0, 0.32f, 0)), t2);
-    DrawShape(sCatTail, MatrixMultiply(t1, root));
-    DrawShape(sCatTail, MatrixMultiply(t2, root));
-    DrawShape(sCatTailTip, MatrixMultiply(t3, root));
+    // The tail goes up and wags faster with the mood; the wave travels from base to tip.
+    const float amp = 0.12f + 0.14f * joy;
+    Matrix seg = MatrixMultiply(MatrixRotateZ(0.95f - 0.4f * joy + amp * sinf(gScene.wag) + 0.1f * gScene.beat), MatrixTranslate(-0.48f, 0.56f, 0));
+    for (int i = 0; i < 5; i++) {
+        if (i > 0) seg = MatrixMultiply(MatrixMultiply(MatrixRotateZ(-0.28f + amp * sinf(gScene.wag - i * 0.7f)), MatrixTranslate(0, 0.2f, 0)), seg);
+        DrawShape(sCatTail[i], MatrixMultiply(seg, root), plain, lift2);
+    }
 }
 
 // The objects the chart placed on the path, each in its current state.
@@ -2183,12 +2391,12 @@ static void RenderWorld(double t)
     // come the hit springs, a breath on every kick drum, and a slow drift that
     // grows with the streak.
     const float aspect = (float)gVW / (float)gVH, tanHalf = 0.3057f;   // tan(34 deg / 2)
-    const float dist = std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
+    const float dist = gCloseup ? 4.2f : std::clamp(4.3f / (tanHalf * aspect), 9.8f, 24.0f);
     const float reach = dist / 9.8f;
     gViewHalf = dist * tanHalf * aspect;
-    gViewCentre = s.worldX + gViewHalf * 0.47f;
+    gViewCentre = s.worldX + (gCloseup ? 0.2f : gViewHalf * 0.47f);
     const float driftX = 0.3f * gJoy * sinf(s.time * 0.7f), driftY = 0.1f * gJoy * sinf(s.time * 1.1f);
-    const float camX = gViewCentre + (gRig.x + driftX) * reach, baseY = s.camY + 1.3f;
+    const float camX = gViewCentre + (gRig.x + driftX) * reach, baseY = s.camY + (gCloseup ? 0.8f : 1.3f);
     gCamera.position = Vector3{ camX, baseY + 1.3f * reach + (gRig.y + driftY) * reach, dist };
     gCamera.target = Vector3{ gViewCentre + gRig.x * 0.5f * reach, baseY + gRig.y * 0.5f * reach, 0.0f };
     gCamera.up = Vector3{ sinf(gRig.roll), cosf(gRig.roll), 0 };
@@ -2215,7 +2423,7 @@ static void RenderWorld(double t)
     }
 
     gLight.camera = gCamera.position;
-    gLight.lightDir = Vector3Normalize(Vector3{ -0.45f, 0.8f, 0.5f });
+    gLight.lightDir = Vector3Normalize(Vector3{ 0.4f, 0.8f, 0.5f });   // from ahead of the cat, where the sun is drawn, so its face is lit
     gLight.sun = gPalette.sun;
     gLight.ambient = Vector3Scale(gPalette.ambient, 1.0f + 0.12f * gJoy);
     gLight.saturation = 1.0f + 0.35f * gJoy;
@@ -2433,6 +2641,21 @@ static void DrawMenu()
         const int w = MeasureText(msg.c_str(), 10) + 16;
         Card(leftCx - w / 2, 58 + titleSize, w, 18, kPaper, kCoralLine);
         Text(msg.c_str(), leftCx, 62 + titleSize, 10, kCoralLine, 1, false);
+    }
+    // Who is walking: left and right choose the cat, and the new one does a little hop.
+    {
+        const CatKind& cat = kCats[gCfg.cat];
+        const int y = gVH - 60;
+        int step = 0;
+        if (Button(leftCx - 104, y, 20, 20, "<") || Key(KEY_LEFT)) step = -1;
+        if (Button(leftCx + 84, y, 20, 20, ">") || Key(KEY_RIGHT)) step = 1;
+        Card(leftCx - 80, y, 160, 20, kPaper, kLine);
+        Text(TextFormat("%s  -  %s", cat.name, cat.note), leftCx, y + 5, 10, kCocoa, 1, false);
+        if (step) {
+            gCfg.cat = (gCfg.cat + step + kCatCount) % kCatCount;
+            BuildCat(gCfg.cat);
+            CatDo(ACT_HOP);
+        }
     }
     Text(TextFormat("now passing: %s", kBiomeName[BiomeNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
     Text("Esc pauses  -  F11 fullscreen", leftCx, gVH - 16, 10, kSoft);
@@ -2778,12 +3001,13 @@ int main(int argc, char** argv)
     // --selftest                      analysis and sound check, no window
     // --sfx-demo <wav>                writes a short audition of the sound effects
     // --shot <png> [--view menu|ready|play|pause|results] [--at <seconds>] [--size WxH] [--diff 0..2] [--scenery 0..5]
+    //              [--cat 0..6] [--closeup]
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
     std::string songPath;
     std::string shotView = "play";
     double shotAt = 12.0;
-    int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1;
+    int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
         if (!strcmp(argv[i], "--sfx-demo") && i + 1 < argc) return WriteSfxDemo(argv[i + 1]) ? 0 : 1;
@@ -2792,6 +3016,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) shotAt = atof(argv[++i]);
         else if (!strcmp(argv[i], "--diff") && i + 1 < argc) shotDiff = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scenery") && i + 1 < argc) shotScenery = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cat") && i + 1 < argc) shotCat = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--closeup")) gCloseup = true;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &winW, &winH);
         else if (argv[i][0] != '-') songPath = argv[i];
     }
@@ -2818,6 +3044,7 @@ int main(int argc, char** argv)
     } else {
         if (shotDiff >= 0) gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
         if (shotScenery >= 0) gCfg.scenery = std::clamp(shotScenery, 0, (int)BIOME_COUNT);
+        if (shotCat >= 0) gCfg.cat = shotCat;
         // Screenshots never touch the real library; the menu gets a sample shelf instead.
         static const char* kSample[6] = { "Sunday Morning Tea", "Rooftop Lullaby", "Paper Lanterns", "Tiny Planet Waltz", "Rain on the Greenhouse", "Marmalade Skies" };
         static const float kSampleBest[6] = { 0.97f, 0.91f, -1.0f, 0.82f, 0.70f, -1.0f };
@@ -2837,8 +3064,17 @@ int main(int argc, char** argv)
         gMenuSel = 1;
     }
 
+    gCfg.cat = std::clamp(gCfg.cat, 0, kCatCount - 1);
     BuildShapes();
+    BuildCat(gCfg.cat);
     UpdateCanvas();
+
+    // Frame pacing is done here rather than left to v-sync (which drivers can
+    // switch off, letting the loop spin a whole core) or to raylib's limiter
+    // (which busy-waits). The game sleeps precisely until the next frame is due.
+    int refresh = gSim ? 0 : GetMonitorRefreshRate(GetCurrentMonitor());
+    if (refresh < 30) refresh = 60;
+    double frameStart = NowSeconds(), nextFrame = frameStart;
 
     int shotFrames = 0, shotHold = -1;
     if (gSim) {
@@ -2855,7 +3091,20 @@ int main(int argc, char** argv)
 
     bool quit = false;
     while (!quit && (gSim || !WindowShouldClose())) {
-        const float dt = gSim ? 1.0f / 60.0f : std::clamp(GetFrameTime(), 0.0005f, 0.1f);
+        float dt = 1.0f / 60.0f;
+        if (!gSim) {
+            // Wait until this frame is due: up to 120 a second while playing, 60 in
+            // menus, 30 when the window is in the background.
+            const bool playing = gState == ST_PLAYING || gState == ST_COUNTDOWN;
+            const int cap = !IsWindowFocused() ? 30 : std::min(refresh, playing ? 120 : 60);
+            nextFrame += 1.0 / cap;
+            double now = NowSeconds();
+            if (nextFrame < now - 0.05) nextFrame = now;   // fell behind: start over instead of catching up
+            PlatformSleep(nextFrame - now);
+            now = NowSeconds();
+            dt = (float)std::clamp(now - frameStart, 0.0005, 0.1);
+            frameStart = now;
+        }
         UpdateCanvas();
         gFrameState = gState;
 
@@ -2895,6 +3144,12 @@ int main(int argc, char** argv)
 
         UpdateScene(dt, t);
 
+        if (!gSim && (IsWindowMinimized() || PlatformWindowMinimized(GetWindowHandle()))) {   // nothing to show: keep the events flowing and doze
+            PollInputEvents();
+            PlatformSleep(0.1);
+            continue;
+        }
+
         BeginTextureMode(gCanvas);
         DrawFrame(t);
         EndTextureMode();
@@ -2930,6 +3185,8 @@ int main(int argc, char** argv)
 
     gPlayer.playing.store(false);
     if (gJob.thread.joinable()) gJob.thread.join();
+    gPlayer.pcm.Free();
+    gJob.pcm.Free();
     if (!gSim) {
         SaveSettings();
         PlatformStopKeyInput();

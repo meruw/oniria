@@ -35,6 +35,14 @@ Every hit in a row makes the walk happier, and a miss calms it back down:
 - As the streak grows the cat prances, blushes and gives off hearts, flowers spring up ahead of it, the trees dance harder, lamps come on, soft lights and petals drift through the sky, and eventually a rainbow comes out.
 - The five hearts under the score show the current mood. Streaks of 10, 25, 50 and 100 get a banner and a little fanfare.
 
+### Cats
+
+Seven cats share the walk: Mango the orange tabby, Domino the tuxedo, Mochi the calico, Luna the siamese, Pebble the british blue, Cloud the fluffy white one and Midnight the black cat. They differ in coat pattern, colours, eye colour, collar and a few proportions. Pick one with the arrows under the title in the main menu (or the left and right keys); the choice is remembered.
+
+| Mango | Domino | Luna | Cloud |
+| --- | --- | --- | --- |
+| ![Mango](docs/img/cat-mango.png) | ![Domino](docs/img/cat-domino.png) | ![Luna](docs/img/cat-luna.png) | ![Cloud](docs/img/cat-cloud.png) |
+
 ### Camera and impact
 
 Every hit moves the camera in its own way: it bounces with a hop, lunges with a bat, tips with a swat and sways with a bell, then settles within a quarter of a second. It also breathes with the kick drum and leans in for streak milestones. On screen each hit throws out streaks from where it landed, a ring bursts towards you, and the edges of the frame glow in the colour of that action. Bells send out rings of sound, hops kick up dust.
@@ -63,6 +71,20 @@ Other options on the song screen:
 - **Audio offset**: raise it if things reach the cat before you hear the beat (Bluetooth headphones usually need this).
 - **Watch mode**: the cat plays by itself, if you just want to look and listen.
 - **Key hints**: shows the key above each upcoming object.
+
+## How light it is
+
+Measured on Windows with the release build:
+
+| | |
+| --- | --- |
+| Executable | 1.1 MB, no other files to ship |
+| Memory | about 65 MB with the menu open, plus roughly 10 MB per minute of the loaded song |
+| CPU, window open in the background | about 6% of one core (half of it is the audio device thread) |
+| CPU, minimized | about 5% of one core; nothing is drawn |
+| Frame cost | about 1 ms of CPU per frame; the 3D scene is drawn into a 640x360 canvas |
+
+Frames are capped at 120 per second while playing, 60 in menus and 30 when the window is not focused. Songs are analyzed in about a tenth of a second per minute of music.
 
 ## Loading music
 

@@ -2,6 +2,23 @@
 
 Newest entries first.
 
+## 2026-11-13: seven cats, a better cat, and a measured diet
+
+**"It must be very lightweight, remember."** A fair reminder, and measuring instead of assuming paid off at once: with the menu open the game was using 123% of a CPU core. V-sync was requested but not being applied, so the loop was drawing thousands of frames a second. Nothing in the screenshot-based checks could have shown that.
+
+What changed:
+
+- The game now paces its own frames, sleeping on a high-resolution timer: 120 a second while playing, 60 in menus, 30 in the background, nothing drawn while minimized. Capping with raylib's limiter came first and still cost a quarter of a core, because it busy-waits part of each frame and the display here runs at 240 Hz.
+- A window that starts minimized never reports being minimized to the framework, so the OS is asked directly.
+- A song is no longer held twice during loading, and the analysis no longer builds a mono copy of the whole track.
+- Sound synthesis at startup uses recurrences instead of a `sin` and an `exp` per sample.
+
+After: about 6% of one core with the window open, of which half is the audio device thread and outside the game's control. The self-test prints the same charts and the same sound levels as before these changes.
+
+**The cat.** The old one was two stretched balls on four boxes. The new one is built from lofts (rings skinned into a surface), which gives it a real torso, a round head with a short muzzle, big eyes with a highlight, proper ears, two-part legs with paws, a five-segment tail, and a collar with a bell. It took three rounds: the first version had a long snout and long legs and looked like a fox, and its face was in shadow because the scene's light came from behind it. Shorter muzzle, shorter legs, bigger head, and the light moved to where the sun is actually drawn.
+
+**Seven cats.** Because every coat is a colour rule over the same lofts, variety was nearly free: tabby, tuxedo, calico, siamese, british blue, fluffy white and black, each with its own eyes and collar and slightly different proportions. They are picked from the main menu, where the cat strolling behind the title doubles as the preview.
+
 ## 2026-11-13: places, a camera that reacts, and a song shelf
 
 Three requests in one go.

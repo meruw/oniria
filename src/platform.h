@@ -29,6 +29,13 @@ struct LaneKeyEvent {
     double time;   // NowSeconds() when the key changed
 };
 
+// True while the window is minimized. Asked of the OS directly, because a
+// window that starts out minimized never reports the change.
+bool PlatformWindowMinimized(void* window);
+
+// Sleeps without burning CPU. Accurate to well under a millisecond on Windows 10 and later.
+void PlatformSleep(double seconds);
+
 bool PlatformStartKeyInput(void* gameWindow);
 void PlatformStopKeyInput();
 int  PlatformPollKeys(LaneKeyEvent* out, int maxEvents);
