@@ -68,16 +68,52 @@ bool PlatformReadFile(const std::string& utf8Path, std::vector<uint8_t>& out)
 
 bool PlatformWindowMinimized(void* window) { return window && IsIconic((HWND)window) != 0; }
 
+bool PlatformFocusWindow(void* window)
+{
+    HWND hwnd = (HWND)window;
+    if (GetForegroundWindow() == hwnd) return true;
+    // Windows only lets the foreground thread hand over the foreground, so borrow its input queue for a moment.
+    const DWORD front = GetWindowThreadProcessId(GetForegroundWindow(), nullptr), self = GetCurrentThreadId();
+    if (front && front != self) AttachThreadInput(front, self, TRUE);
+    ShowWindow(hwnd, SW_RESTORE);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    if (front && front != self) AttachThreadInput(front, self, FALSE);
+    return GetForegroundWindow() == hwnd;
+}
+
+static bool SendScan(void* window, WORD scan, bool extended, bool down)
+{
+    if (GetForegroundWindow() != (HWND)window) return false;   // never type into someone else's window
+    INPUT in = {};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wScan = scan;
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (extended ? KEYEVENTF_EXTENDEDKEY : 0) | (down ? 0 : KEYEVENTF_KEYUP);
+    return SendInput(1, &in, sizeof(in)) == 1;
+}
+
+bool PlatformSendLaneKey(void* window, int lane, bool down)
+{
+    static const WORD kScan[4] = { 0x20, 0x21, 0x24, 0x25 };   // D F J K
+    return lane >= 0 && lane < 4 && SendScan(window, kScan[lane], false, down);
+}
+
+bool PlatformSendKey(void* window, int virtualKey, bool down)
+{
+    return SendScan(window, (WORD)MapVirtualKeyW((UINT)virtualKey, MAPVK_VK_TO_VSC), false, down);
+}
+
 void PlatformSleep(double seconds)
 {
     if (seconds <= 0.0) return;
     // A high-resolution waitable timer sleeps precisely, so no busy-waiting is needed to hit a frame time.
-    static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    // One timer per thread: two threads sharing a timer re-arm it under each other, and one of them never wakes.
+    thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     if (timer) {
         LARGE_INTEGER due;
         due.QuadPart = -(LONGLONG)(seconds * 1e7);   // relative, in 100 ns units
         if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
-            WaitForSingleObject(timer, INFINITE);
+            WaitForSingleObject(timer, (DWORD)(seconds * 1000.0) + 100);   // bounded, so a lost timer can never hang a thread
             return;
         }
     }
@@ -231,6 +267,9 @@ bool PlatformReadFile(const std::string& utf8Path, std::vector<uint8_t>& out)
 }
 
 bool PlatformWindowMinimized(void*) { return false; }
+bool PlatformFocusWindow(void*) { return false; }
+bool PlatformSendLaneKey(void*, int, bool) { return false; }
+bool PlatformSendKey(void*, int, bool) { return false; }
 
 void PlatformSleep(double seconds)
 {

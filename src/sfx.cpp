@@ -153,6 +153,40 @@ float SfxStreakSemitones(int streak)
     return (float)kScale[streak <= 8 ? streak - 1 : kTune[streak % 8]];
 }
 
+namespace {
+bool WriteWav(const char* path, const std::vector<float>& samples)
+{
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    const uint32_t dataBytes = (uint32_t)(samples.size() * 2), rate = kSfxRate, byteRate = rate * 2, riffSize = 36 + dataBytes, fmtSize = 16;
+    const uint16_t pcm = 1, channels = 1, blockAlign = 2, bits = 16;
+    fwrite("RIFF", 1, 4, f); fwrite(&riffSize, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f);
+    fwrite(&fmtSize, 4, 1, f); fwrite(&pcm, 2, 1, f); fwrite(&channels, 2, 1, f);
+    fwrite(&rate, 4, 1, f); fwrite(&byteRate, 4, 1, f); fwrite(&blockAlign, 2, 1, f); fwrite(&bits, 2, 1, f);
+    fwrite("data", 1, 4, f); fwrite(&dataBytes, 4, 1, f);
+    for (float v : samples) {
+        const int16_t sample = (int16_t)(std::clamp(v, -1.0f, 1.0f) * 32767.0f);
+        fwrite(&sample, 2, 1, f);
+    }
+    fclose(f);
+    return true;
+}
+} // namespace
+
+bool WriteSfxFiles(const char* folder)
+{
+    static const char* kNames[SFX_COUNT] = { "hop", "bat", "swat", "ring", "twinkle", "miss", "milestone", "click" };
+    std::vector<float> sfx[SFX_COUNT];
+    BuildSfx(sfx);
+    bool ok = true;
+    for (int i = 0; i < SFX_COUNT; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s.wav", folder, kNames[i]);
+        ok = WriteWav(path, sfx[i]) && ok;
+    }
+    return ok;
+}
+
 bool WriteSfxDemo(const char* path)
 {
     std::vector<float> sfx[SFX_COUNT];

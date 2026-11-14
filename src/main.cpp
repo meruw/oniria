@@ -108,8 +108,11 @@ static void LoadSettings()
     fclose(f);
 }
 
+static bool gKeepSettings = false;   // the end-to-end test forces a few settings; it must not write them over the player's
+
 static void SaveSettings()
 {
+    if (gKeepSettings) return;
     FILE* f = fopen(ConfigPath().c_str(), "w");
     if (!f) return;
     fprintf(f, "diff=%d\nspeed=%.2f\noffset=%d\nwatch=%d\nhints=%d\nsfx=%d\nscenery=%d\ncat=%d\n",
@@ -249,6 +252,9 @@ static SfxCommand gSfxQueue[64];
 static std::atomic<unsigned> gSfxWrite{ 0 }, gSfxRead{ 0 };
 static SfxVoice gSfxVoices[16];
 
+// Counters for the end-to-end test: is the audio thread really running, and is it sending the song?
+static std::atomic<uint64_t> gAudioCallbacks{ 0 }, gAudioFrames{ 0 }, gAudioSongFrames{ 0 }, gAudioLoudFrames{ 0 }, gSfxStarted{ 0 }, gAudioLimited{ 0 };
+
 static void MixSfx(float* out, unsigned int frames)
 {
     unsigned r = gSfxRead.load(std::memory_order_relaxed);
@@ -265,6 +271,7 @@ static void MixSfx(float* out, unsigned int frames)
         v->pos = 0.0;
         v->step = (double)c.rate * kSfxRate / gPlayer.sampleRate;
         v->gain = c.gain;
+        gSfxStarted.fetch_add(1, std::memory_order_relaxed);
     }
     gSfxRead.store(r, std::memory_order_release);
 
@@ -285,28 +292,45 @@ static void MixSfx(float* out, unsigned int frames)
 static void FeedAudio(void* buffer, unsigned int frames)
 {
     float* out = (float*)buffer;
+    gAudioCallbacks.fetch_add(1, std::memory_order_relaxed);
+    gAudioFrames.fetch_add(frames, std::memory_order_relaxed);
     if (gPlayer.playing.load(std::memory_order_relaxed) && gPlayer.mutex.try_lock()) {
         const int64_t pos = gPlayer.pos.load(std::memory_order_relaxed);
         StampLocked(pos);
         const int16_t* data = gPlayer.pcm.data;
         const int64_t total = gPlayer.frames;
         const float k = 0.9f / 32768.0f * gPlayer.gain.load(std::memory_order_relaxed);   // a little headroom for the effects on top
+        unsigned int inSong = 0, loud = 0;
         for (unsigned int i = 0; i < frames; i++) {
             const int64_t f = pos + i;
             if (f >= 0 && f < total) {
                 out[2 * i]     = data[2 * f] * k;
                 out[2 * i + 1] = data[2 * f + 1] * k;
+                inSong++;
+                loud += data[2 * f] > 300 || data[2 * f] < -300;
             } else {
                 out[2 * i] = out[2 * i + 1] = 0.0f;
             }
         }
         gPlayer.pos.store(pos + frames, std::memory_order_relaxed);
         gPlayer.mutex.unlock();
+        gAudioSongFrames.fetch_add(inSong, std::memory_order_relaxed);
+        gAudioLoudFrames.fetch_add(loud, std::memory_order_relaxed);
     } else {
         memset(out, 0, (size_t)frames * 2 * sizeof(float));
     }
     MixSfx(out, frames);
-    for (unsigned int i = 0; i < frames * 2; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
+    // A loud song plus a few effects can pass full scale. Round the top off instead of clipping it flat:
+    // untouched below 0.8, then easing towards 1.0.
+    unsigned int limited = 0;
+    for (unsigned int i = 0; i < frames * 2; i++) {
+        const float v = out[i], mag = std::fabs(v);
+        if (mag > 0.8f) {
+            out[i] = std::copysign(0.8f + 0.2f * std::tanh((mag - 0.8f) * 5.0f), v);
+            limited++;
+        }
+    }
+    if (limited) gAudioLimited.fetch_add(limited, std::memory_order_relaxed);
 }
 
 // Where the audio thread is in the song right now, in seconds.
@@ -380,6 +404,13 @@ static float gCatActionAge = 9.0f;
 
 static void CatDo(int action) { gCatAction = action; gCatActionAge = 0.0f; }
 
+// End-to-end test (--robot): a thread presses real keys, the game logs what it measured.
+static FILE* gLog = nullptr;
+static std::vector<float> gRobotPlan;   // per note: how late the robot means to be, in seconds; NaN = miss it on purpose
+static std::vector<float> gRobotDid;    // per note: how late it really was when it handed the key to the system
+static double gHitErrorSum = 0.0, gHitErrorMax = 0.0;   // difference between meant and measured timing
+static int    gHitErrorCount = 0;
+
 // Happiness. Every hit adds to the streak and a miss empties it; `gJoy` eases
 // towards a 0..1 value derived from it and drives everything festive: the
 // cat's mood, flowers, lights, how much the world dances.
@@ -447,6 +478,7 @@ struct CameraRig {
     int   flip = 1;                                  // alternates so rolls go left, right, left
 };
 static CameraRig gRig;
+static float gRigMax[4] = { 0, 0, 0, 0 };   // the furthest the camera was pushed (x, y, roll, zoom); reported by the end-to-end test
 
 // How much the camera and the screen are allowed to move: a setting, for people who prefer it calmer.
 static float MotionScale() { return gCfg.motion >= 2 ? 1.0f : gCfg.motion == 1 ? 0.45f : 0.0f; }
@@ -1159,91 +1191,104 @@ static void BuildCat(int kind)
         AddLoft(sCatTail[i], seg, 2, 6, X, Z, [&](int, int, float) -> Vector3 { return col; });
     }
 
-    // ---- On the head (head space; the crown of the head is around y = 0.31) ----
-    const Vector3 top = { 0.06f, 0.29f, 0 };
+    // ---- On the head (head space) ----
+    // The head is close to an ellipsoid centred on (0.08, 0.04, 0): 0.27 long, 0.33 tall, 0.38 wide.
+    // Hats are built from ellipses that follow it, so they sit on the head rather than floating or sinking in.
+    const float hx = 0.08f, hy = 0.04f, headX = 0.27f, headY = 0.33f, headZ = 0.38f * hw;
+    // A point on the head: `f` is how far out from the crown (0 at the top, 1 at the widest), `a` the direction.
+    auto onHead = [&](float f, float a, float out) {
+        return Vector3{ hx + headX * f * cosf(a), hy + headY * sqrtf(1.0f - f * f) + out, headZ * f * sinf(a) };
+    };
+    // A level ellipse `rz` wide and `rx` long at height y; `dx` slides it back or forward.
+    auto level = [&](float y, float rz, float rx, float dx = 0.0f) { return LoftRing{ { hx + dx, y, 0 }, rz * hw, rx }; };
     static const Vector3 kPetals[4] = { { 1.0f, 0.62f, 0.72f }, { 1.0f, 0.88f, 0.45f }, { 1.0f, 1.0f, 1.0f }, { 0.78f, 0.72f, 1.0f } };
     switch (gCfg.hat) {
-        case 1: {   // bow, by the near ear
+        case 1: {   // bow, sitting on the slope of the head beside the near ear
             const Vector3 ribbon = Rgb(242, 112, 142);
-            AddBlob(sCatHat, { 0.07f, 0.31f, 0.11f }, { 0.045f, 0.075f, 0.085f }, ribbon);
-            AddBlob(sCatHat, { 0.07f, 0.29f, 0.29f }, { 0.045f, 0.075f, 0.085f }, ribbon);
-            AddBlob(sCatHat, { 0.085f, 0.30f, 0.20f }, { 0.045f, 0.045f, 0.04f }, Rgb(214, 86, 118));
+            AddBlob(sCatHat, Vector3Add(onHead(0.26f, 1.2f, 0.035f), Vector3{ 0.02f, 0, 0 }), { 0.05f, 0.085f, 0.095f }, ribbon);
+            AddBlob(sCatHat, Vector3Add(onHead(0.72f, 1.5f, 0.045f), Vector3{ 0.02f, 0, 0 }), { 0.05f, 0.085f, 0.095f }, ribbon);
+            AddBlob(sCatHat, Vector3Add(onHead(0.50f, 1.4f, 0.035f), Vector3{ 0.035f, 0, 0 }), { 0.05f, 0.05f, 0.045f }, Rgb(214, 86, 118));
             break;
         }
-        case 2:     // flower crown
-            for (int i = 0; i < 9; i++) {
-                const float a = 2 * kPi * i / 9;
-                AddBlob(sCatHat, { top.x + cosf(a) * 0.27f, 0.255f - 0.03f * cosf(a), sinf(a) * 0.29f * hw }, { 0.065f, 0.05f, 0.065f }, kPetals[i & 3]);
-                AddBlob(sCatHat, { top.x + cosf(a + 0.35f) * 0.26f, 0.235f - 0.03f * cosf(a), sinf(a + 0.35f) * 0.28f * hw }, { 0.04f, 0.03f, 0.04f }, Rgb(120, 180, 110));
+        case 2:     // flower crown, resting on the head all the way round
+            for (int i = 0; i < 10; i++) {
+                const float a = 2 * kPi * i / 10;
+                AddBlob(sCatHat, onHead(0.72f, a, 0.025f), { 0.065f, 0.05f, 0.065f }, kPetals[i & 3]);
+                AddBlob(sCatHat, onHead(0.74f, a + 0.31f, 0.0f), { 0.045f, 0.03f, 0.045f }, Rgb(120, 180, 110));
             }
             break;
         case 3: {   // party hat, striped, with a pom on top
-            const size_t from = sCatHat.size();
-            const Vector3 tipAt = { top.x - 0.03f, top.y + 0.40f, 0 };
-            for (int i = 0; i < 8; i++) {
-                const float a0 = 2 * kPi * i / 8, a1 = 2 * kPi * (i + 1) / 8;
-                sCatHat.push_back({ { top.x + cosf(a0) * 0.16f, top.y - 0.02f, sinf(a0) * 0.16f }, { top.x + cosf(a1) * 0.16f, top.y - 0.02f, sinf(a1) * 0.16f }, tipAt,
-                                    (i & 1) ? Rgb(255, 222, 110) : Rgb(120, 200, 236) });
-            }
-            Orient(sCatHat, from, Vector3{ top.x, top.y + 0.1f, 0 });
-            AddBlob(sCatHat, tipAt, { 0.05f, 0.05f, 0.05f }, Rgb(250, 130, 150));
+            const LoftRing cone[2] = { level(0.325f, 0.17f, 0.125f), level(0.72f, 0.012f, 0.01f, -0.02f) };
+            AddLoft(sCatHat, cone, 2, 8, Z, X, [&](int, int side, float) -> Vector3 { return (side & 1) ? Rgb(255, 222, 110) : Rgb(120, 200, 236); });
+            AddBlob(sCatHat, { hx - 0.02f, 0.73f, 0 }, { 0.05f, 0.05f, 0.05f }, Rgb(250, 130, 150));
             break;
         }
         case 4: {   // straw hat
-            const Vector3 straw = Rgb(240, 214, 150), strawLight = Rgb(250, 230, 176);
-            AddCylinder(sCatHat, { top.x, top.y - 0.04f, 0 }, 0.46f, 0.03f, 10, straw, strawLight);
-            AddCylinder(sCatHat, { top.x, top.y - 0.02f, 0 }, 0.23f, 0.16f, 8, straw, strawLight);
-            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.238f, 0.045f, 8, Rgb(226, 100, 100), Rgb(226, 100, 100));
+            const Vector3 straw = Rgb(240, 214, 150), strawLight = Rgb(250, 230, 176), band = Rgb(226, 100, 100);
+            const LoftRing brim[2] = { level(0.288f, 0.52f, 0.44f), level(0.306f, 0.52f, 0.44f) };
+            const LoftRing crown[2] = { level(0.306f, 0.245f, 0.175f), level(0.46f, 0.22f, 0.155f) };
+            const LoftRing ribbon[2] = { level(0.31f, 0.252f, 0.182f), level(0.352f, 0.247f, 0.178f) };
+            AddLoft(sCatHat, brim, 2, 12, Z, X, [&](int, int side, float) -> Vector3 { return (side & 1) ? straw : strawLight; });
+            AddLoft(sCatHat, crown, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return straw; });
+            AddLoft(sCatHat, ribbon, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return band; });
             break;
         }
-        case 5: {   // beanie
+        case 5: {   // beanie: a cuff that hugs the head just above the eyes, a dome and a pom
             const Vector3 wool = Rgb(96, 180, 190), cuff = Rgb(240, 246, 246);
-            AddBlob(sCatHat, { top.x, top.y - 0.07f, 0 }, { 0.35f, 0.27f, 0.37f * hw }, wool);
-            const LoftRing band[2] = { { { top.x, top.y - 0.10f, 0 }, 0.385f * hw, 0.365f }, { { top.x, top.y - 0.02f, 0 }, 0.36f * hw, 0.345f } };
-            AddLoft(sCatHat, band, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return cuff; });
-            AddBlob(sCatHat, { top.x, top.y + 0.22f, 0 }, { 0.075f, 0.075f, 0.075f }, cuff);
+            const LoftRing fold[2] = { level(0.15f, 0.385f, 0.28f), level(0.235f, 0.34f, 0.245f) };
+            const LoftRing dome[4] = { level(0.235f, 0.335f, 0.24f), level(0.34f, 0.255f, 0.18f), level(0.41f, 0.15f, 0.105f), level(0.44f, 0.03f, 0.02f) };
+            AddLoft(sCatHat, fold, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return cuff; });
+            AddLoft(sCatHat, dome, 4, 10, Z, X, [&](int, int side, float) -> Vector3 { return (side & 1) ? wool : Rgb(84, 164, 176); });
+            AddBlob(sCatHat, { hx, 0.475f, 0 }, { 0.075f, 0.075f, 0.075f }, cuff);
             break;
         }
-        case 6: {   // witch hat
-            const Vector3 cloth = Rgb(110, 84, 150);
-            AddCylinder(sCatHat, { top.x, top.y - 0.04f, 0 }, 0.44f, 0.03f, 10, cloth, Rgb(128, 100, 170));
-            AddCone(sCatHat, { top.x, top.y - 0.02f, 0 }, 0.24f, 0.58f, 7, cloth);
-            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.245f, 0.055f, 7, Rgb(60, 46, 70), Rgb(60, 46, 70));
-            AddBox(sCatHat, { top.x + 0.24f, top.y + 0.017f, 0 }, { 0.015f, 0.035f, 0.045f }, gold);
+        case 6: {   // witch hat, its tip bent back
+            const Vector3 cloth = Rgb(110, 84, 150), clothLight = Rgb(128, 100, 170);
+            const LoftRing brim[2] = { level(0.285f, 0.50f, 0.42f), level(0.302f, 0.50f, 0.42f) };
+            const LoftRing cone[4] = { level(0.302f, 0.245f, 0.18f), level(0.50f, 0.15f, 0.11f, -0.02f), level(0.66f, 0.07f, 0.055f, -0.07f), level(0.76f, 0.012f, 0.01f, -0.15f) };
+            const LoftRing band[2] = { level(0.306f, 0.252f, 0.187f), level(0.356f, 0.232f, 0.172f) };
+            AddLoft(sCatHat, brim, 2, 12, Z, X, [&](int, int side, float) -> Vector3 { return (side & 1) ? cloth : clothLight; });
+            AddLoft(sCatHat, cone, 4, 8, Z, X, [&](int, int, float) -> Vector3 { return cloth; });
+            AddLoft(sCatHat, band, 2, 8, Z, X, [&](int, int, float) -> Vector3 { return Rgb(60, 46, 70); });
+            AddBox(sCatHat, { hx + 0.185f, 0.33f, 0 }, { 0.015f, 0.032f, 0.045f }, gold);
             break;
         }
         case 7: {   // top hat
-            const Vector3 felt = Rgb(58, 50, 68);
-            AddCylinder(sCatHat, { top.x, top.y - 0.03f, 0 }, 0.32f, 0.03f, 10, felt, Rgb(74, 66, 86));
-            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.20f, 0.34f, 8, felt, Rgb(74, 66, 86));
-            AddCylinder(sCatHat, { top.x, top.y, 0 }, 0.207f, 0.06f, 8, Rgb(226, 100, 100), Rgb(226, 100, 100));
+            const Vector3 felt = Rgb(58, 50, 68), feltLight = Rgb(78, 70, 90);
+            const LoftRing brim[2] = { level(0.30f, 0.33f, 0.27f), level(0.316f, 0.33f, 0.27f) };
+            const LoftRing tube[2] = { level(0.316f, 0.215f, 0.165f), level(0.62f, 0.228f, 0.176f) };
+            const LoftRing band[2] = { level(0.32f, 0.222f, 0.172f), level(0.378f, 0.224f, 0.174f) };
+            AddLoft(sCatHat, brim, 2, 12, Z, X, [&](int, int, float) -> Vector3 { return feltLight; });
+            AddLoft(sCatHat, tube, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return felt; });
+            AddLoft(sCatHat, band, 2, 10, Z, X, [&](int, int, float) -> Vector3 { return Rgb(226, 100, 100); });
             break;
         }
         case 8: {   // crown
-            AddCylinder(sCatHat, { top.x, top.y - 0.01f, 0 }, 0.20f, 0.10f, 8, gold, Rgb(255, 232, 140));
+            const LoftRing band[2] = { level(0.30f, 0.235f, 0.175f), level(0.40f, 0.248f, 0.186f) };
+            AddLoft(sCatHat, band, 2, 10, Z, X, [&](int, int side, float) -> Vector3 { return (side & 1) ? gold : Rgb(255, 232, 140); });
             for (int i = 0; i < 6; i++) {
                 const float a = 2 * kPi * (i + 0.5f) / 6;
-                AddCone(sCatHat, { top.x + cosf(a) * 0.16f, top.y + 0.08f, sinf(a) * 0.16f }, 0.055f, 0.13f, 4, gold);
-                AddBlob(sCatHat, { top.x + cosf(a) * 0.20f, top.y + 0.04f, sinf(a) * 0.20f }, { 0.028f, 0.028f, 0.028f }, (i & 1) ? Rgb(236, 96, 110) : Rgb(110, 180, 240));
+                AddCone(sCatHat, { hx + cosf(a) * 0.16f, 0.395f, sinf(a) * 0.215f * hw }, 0.055f, 0.13f, 4, gold);
+                AddBlob(sCatHat, { hx + cosf(a) * 0.19f, 0.35f, sinf(a) * 0.25f * hw }, { 0.028f, 0.028f, 0.028f }, (i & 1) ? Rgb(236, 96, 110) : Rgb(110, 180, 240));
             }
             break;
         }
-        case 9: {   // headphones
-            const Vector3 shell = Rgb(240, 128, 144), bandCol = Rgb(70, 60, 80);
-            const float ez = 0.39f * hw;
-            const Vector3 arc[5] = { { top.x, 0.10f, ez }, { top.x, 0.30f, ez * 0.75f }, { top.x, 0.38f, 0 }, { top.x, 0.30f, -ez * 0.75f }, { top.x, 0.10f, -ez } };
-            for (int i = 0; i < 4; i++) AddBeam(sCatHat, arc[i], arc[i + 1], 0.022f, bandCol);
+        case 9: {   // headphones: a band over the top, a cup on each side
+            const Vector3 shell = Rgb(240, 128, 144), dark = Rgb(70, 60, 80);
+            const float ez = headZ + 0.03f;
+            const Vector3 arc[5] = { { hx, 0.14f, ez }, { hx, 0.36f, ez * 0.74f }, { hx, 0.44f, 0 }, { hx, 0.36f, -ez * 0.74f }, { hx, 0.14f, -ez } };
+            for (int i = 0; i < 4; i++) AddBeam(sCatHat, arc[i], arc[i + 1], 0.022f, dark);
             for (int side = -1; side <= 1; side += 2) {
-                AddBlob(sCatHat, { top.x, 0.03f, side * ez }, { 0.12f, 0.14f, 0.07f }, shell);
-                AddBlob(sCatHat, { top.x, 0.03f, side * (ez + 0.04f) }, { 0.07f, 0.08f, 0.04f }, bandCol);
+                AddBlob(sCatHat, { hx, 0.04f, side * ez }, { 0.12f, 0.14f, 0.07f }, shell);
+                AddBlob(sCatHat, { hx, 0.04f, side * (ez + 0.045f) }, { 0.07f, 0.08f, 0.04f }, dark);
             }
             break;
         }
-        case 10:    // halo
+        case 10:    // halo, floating above the head
             for (int i = 0; i < 12; i++) {
-                const float a0 = 2 * kPi * i / 12, a1 = 2 * kPi * (i + 1) / 12, y = top.y + 0.34f;
-                const Vector3 o0 = { top.x + cosf(a0) * 0.22f, y, sinf(a0) * 0.22f }, o1 = { top.x + cosf(a1) * 0.22f, y, sinf(a1) * 0.22f };
-                const Vector3 i0 = { top.x + cosf(a0) * 0.15f, y + 0.02f, sinf(a0) * 0.15f }, i1 = { top.x + cosf(a1) * 0.15f, y + 0.02f, sinf(a1) * 0.15f };
+                const float a0 = 2 * kPi * i / 12, a1 = 2 * kPi * (i + 1) / 12, y = 0.60f;
+                const Vector3 o0 = { hx + cosf(a0) * 0.22f, y, sinf(a0) * 0.22f }, o1 = { hx + cosf(a1) * 0.22f, y, sinf(a1) * 0.22f };
+                const Vector3 i0 = { hx + cosf(a0) * 0.15f, y + 0.02f, sinf(a0) * 0.15f }, i1 = { hx + cosf(a1) * 0.15f, y + 0.02f, sinf(a1) * 0.15f };
                 sCatHat.push_back({ o0, o1, i1, Rgb(255, 236, 150) });
                 sCatHat.push_back({ o0, i1, i0, Rgb(255, 246, 190) });
             }
@@ -1251,51 +1296,80 @@ static void BuildCat(int kind)
     }
 
     // ---- Around the neck (cat space) ----
-    const LoftRing collar[2] = { { { 0.285f, 0.502f, 0 }, 0.210f * w + 0.014f, 0.222f }, { { 0.335f, 0.532f, 0 }, 0.176f * w + 0.014f, 0.188f } };
-    const Vector3 chin = { 0.37f, 0.365f, 0 };   // just under the neck, at the front
+    // The head is so big that a level collar would be hidden inside it. Collars
+    // lean forward instead: high behind the head, low under the chin, where the
+    // front half shows as a curve across the chest.
+    const Vector3 lean = Vector3Normalize(Vector3{ -0.733f, 0.68f, 0 });   // the direction the collar rises in
+    const Vector3 through = { 0.68f, 0.733f, 0 };                            // at right angles to its plane
+    const Vector3 neckAt = { 0.29f, 0.45f, 0 };
+    const float neckW = 0.235f * w, neckH = 0.20f;
+    // A point on the collar: a = -pi/2 is under the chin, 0 is the near side.
+    auto onCollar = [&](float a, float grow) {
+        return Vector3Add(neckAt, Vector3Add(Vector3Scale(Z, (neckW + grow) * cosf(a)), Vector3Scale(lean, (neckH + grow) * sinf(a))));
+    };
+    // A band `half` wide lying in the collar's plane, `grow` bigger than the neck.
+    auto band = [&](float half, float grow, LoftRing out[2]) {
+        out[0] = LoftRing{ Vector3Subtract(neckAt, Vector3Scale(through, half)), neckW + grow, neckH + grow };
+        out[1] = LoftRing{ Vector3Add(neckAt, Vector3Scale(through, half)), neckW + grow - 0.01f, neckH + grow - 0.01f };
+    };
+    const Vector3 chin = onCollar(-kPi / 2, 0.0f);
+    LoftRing ring[2];
     switch (gCfg.neck) {
         case 1:     // bell collar, in the cat's own colour
-            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return c.collar; });
-            AddBlob(sCatNeck, chin, { 0.048f, 0.048f, 0.048f }, gold);
+            band(0.03f, 0.0f, ring);
+            AddLoft(sCatNeck, ring, 2, 10, Z, lean, [&](int, int, float) -> Vector3 { return c.collar; });
+            AddBlob(sCatNeck, { chin.x + 0.025f, chin.y - 0.045f, 0 }, { 0.052f, 0.052f, 0.052f }, gold);
             break;
         case 2: {   // bow tie
             const Vector3 silk = Rgb(226, 86, 100);
-            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return Rgb(60, 52, 70); });
-            AddBlob(sCatNeck, { chin.x, chin.y, 0.085f }, { 0.04f, 0.065f, 0.075f }, silk);
-            AddBlob(sCatNeck, { chin.x, chin.y, -0.085f }, { 0.04f, 0.065f, 0.075f }, silk);
-            AddBlob(sCatNeck, { chin.x + 0.015f, chin.y, 0 }, { 0.04f, 0.04f, 0.035f }, Rgb(190, 66, 84));
+            band(0.025f, 0.0f, ring);
+            AddLoft(sCatNeck, ring, 2, 10, Z, lean, [&](int, int, float) -> Vector3 { return Rgb(60, 52, 70); });
+            AddBlob(sCatNeck, { chin.x + 0.03f, chin.y - 0.02f, 0.095f }, { 0.045f, 0.07f, 0.085f }, silk);
+            AddBlob(sCatNeck, { chin.x + 0.03f, chin.y - 0.02f, -0.095f }, { 0.045f, 0.07f, 0.085f }, silk);
+            AddBlob(sCatNeck, { chin.x + 0.045f, chin.y - 0.02f, 0 }, { 0.045f, 0.045f, 0.04f }, Rgb(190, 66, 84));
             break;
         }
-        case 3: {   // scarf, striped, with one end hanging
-            const LoftRing wrap[2] = { { { 0.265f, 0.495f, 0 }, 0.245f * w + 0.03f, 0.25f }, { { 0.345f, 0.540f, 0 }, 0.20f * w + 0.03f, 0.21f } };
-            AddLoft(sCatNeck, wrap, 2, 8, Z, Y, [&](int, int side, float) -> Vector3 { return (side & 1) ? Rgb(236, 110, 110) : Rgb(250, 240, 226); });
-            AddBox(sCatNeck, { 0.33f, 0.33f, 0.21f * w }, { 0.035f, 0.12f, 0.05f }, Rgb(236, 110, 110));
-            AddBox(sCatNeck, { 0.33f, 0.20f, 0.21f * w }, { 0.037f, 0.025f, 0.052f }, Rgb(250, 240, 226));
+        case 3: {   // scarf: a thick striped wrap with one end hanging on the near side
+            band(0.065f, 0.03f, ring);
+            AddLoft(sCatNeck, ring, 2, 10, Z, lean, [&](int, int side, float) -> Vector3 { return (side & 1) ? Rgb(236, 110, 110) : Rgb(250, 240, 226); });
+            const Vector3 knot = onCollar(-1.0f, 0.04f);
+            AddBlob(sCatNeck, knot, { 0.07f, 0.06f, 0.06f }, Rgb(236, 110, 110));
+            AddBox(sCatNeck, { knot.x + 0.015f, knot.y - 0.05f, knot.z + 0.02f }, { 0.026f, 0.04f, 0.045f }, Rgb(236, 110, 110));   // short, so it stays on the chest
+            AddBox(sCatNeck, { knot.x + 0.015f, knot.y - 0.10f, knot.z + 0.02f }, { 0.028f, 0.014f, 0.047f }, Rgb(250, 240, 226));
             break;
         }
-        case 4: {   // bandana
+        case 4: {   // bandana: a band with a triangle of cloth over the chest
             const Vector3 cloth = Rgb(232, 98, 98);
-            AddLoft(sCatNeck, collar, 2, 8, Z, Y, [&](int, int, float) -> Vector3 { return cloth; });
-            sCatNeck.push_back({ { 0.385f, 0.47f, 0.18f }, { 0.385f, 0.47f, -0.18f }, { 0.44f, 0.25f, 0 }, cloth });
-            sCatNeck.push_back({ { 0.39f, 0.44f, 0.08f }, { 0.39f, 0.44f, -0.08f }, { 0.425f, 0.34f, 0 }, Rgb(250, 240, 226) });
+            band(0.03f, 0.005f, ring);
+            AddLoft(sCatNeck, ring, 2, 10, Z, lean, [&](int, int, float) -> Vector3 { return cloth; });
+            const Vector3 l = onCollar(-kPi / 2 + 0.95f, 0.02f), r = onCollar(-kPi / 2 - 0.95f, 0.02f), point = { chin.x + 0.06f, chin.y - 0.2f, 0 };
+            const Vector3 front = { 0.03f, 0, 0 };
+            sCatNeck.push_back({ Vector3Add(l, front), Vector3Add(r, front), point, cloth });
+            sCatNeck.push_back({ Vector3Add(Vector3Lerp(l, point, 0.45f), Vector3{ 0.036f, 0, 0 }), Vector3Add(Vector3Lerp(r, point, 0.45f), Vector3{ 0.036f, 0, 0 }),
+                                 Vector3Add(Vector3Lerp(chin, point, 0.85f), Vector3{ 0.04f, 0, 0 }), Rgb(250, 240, 226) });
             break;
         }
-        case 5:     // flower garland
-            for (int i = 0; i < 9; i++) {
-                const float a = 2 * kPi * i / 9;
-                AddBlob(sCatNeck, { 0.31f + 0.03f * sinf(a), 0.517f + 0.215f * sinf(a), 0.215f * w * cosf(a) }, { 0.055f, 0.055f, 0.055f }, kPetals[i & 3]);
-            }
+        case 5:     // flower garland, all the way round
+            for (int i = 0; i < 12; i++)
+                AddBlob(sCatNeck, onCollar(2 * kPi * i / 12, 0.03f), { 0.06f, 0.06f, 0.06f }, kPetals[i & 3]);
             break;
     }
 
-    // ---- On the back (cat space; the top of the back is around y = 0.69) ----
+    // ---- On the back (cat space). The top of the back is around y = 0.69, and
+    // the head hides everything forward of x = 0.05, so these sit well back. ----
     switch (gCfg.back) {
-        case 1: {   // backpack
-            const Vector3 canvas = Rgb(96, 176, 186);
-            AddBox(sCatBack, { -0.04f, 0.74f, 0 }, { 0.15f, 0.12f, 0.19f }, canvas);
-            AddBox(sCatBack, { -0.04f, 0.83f, 0 }, { 0.155f, 0.04f, 0.195f }, Rgb(70, 140, 156));
-            AddBox(sCatBack, { -0.20f, 0.71f, 0 }, { 0.02f, 0.07f, 0.11f }, Rgb(250, 222, 130));
-            for (int side = -1; side <= 1; side += 2) AddBox(sCatBack, { 0.02f, 0.60f, side * 0.21f }, { 0.03f, 0.13f, 0.012f }, Rgb(70, 140, 156));
+        case 1: {   // backpack: a soft bag sitting on the back, a flap over the top, a pocket and a button on each side
+            const Vector3 canvas = Rgb(96, 176, 186), trim = Rgb(70, 140, 156), flap = Rgb(130, 204, 208), button = Rgb(250, 222, 130);
+            const float bx = -0.21f;
+            const LoftRing bag[4] = { { { bx, 0.66f, 0 }, 0.185f, 0.135f }, { { bx, 0.74f, 0 }, 0.205f, 0.15f },
+                                      { { bx, 0.86f, 0 }, 0.19f, 0.14f }, { { bx, 0.915f, 0 }, 0.11f, 0.08f } };
+            AddLoft(sCatBack, bag, 4, 8, Z, X, [&](int ring, int, float) -> Vector3 { return ring >= 2 ? flap : canvas; });
+            for (int side = -1; side <= 1; side += 2) {
+                AddBox(sCatBack, { bx, 0.735f, side * 0.205f }, { 0.085f, 0.06f, 0.022f }, trim);          // side pockets
+                AddBlob(sCatBack, { bx, 0.765f, side * 0.232f }, { 0.024f, 0.024f, 0.016f }, button);
+                AddBox(sCatBack, { -0.07f, 0.62f, side * 0.20f }, { 0.022f, 0.13f, 0.012f }, trim);       // straps
+            }
+            AddBox(sCatBack, { bx - 0.15f, 0.76f, 0 }, { 0.016f, 0.045f, 0.07f }, trim);                   // back pocket
             break;
         }
         case 2:     // balloon; modelled around the knot where its string is tied, so it can sway
@@ -1304,10 +1378,10 @@ static void BuildCat(int kind)
             AddCone(sCatBack, { -0.105f, 0.74f, 0 }, 0.04f, 0.05f, 4, Rgb(214, 86, 100));
             AddBox(sCatBack, { -0.05f, 1.10f, 0.15f }, { 0.02f, 0.05f, 0.02f }, Rgb(255, 214, 220));
             break;
-        case 3:     // wings; one wing, drawn once for each side
-            sCatWing.push_back({ { 0, 0, 0 }, { -0.34f, 0.30f, 0 }, { -0.42f, 0.04f, 0 }, Rgb(255, 255, 255) });
-            sCatWing.push_back({ { 0, 0, 0 }, { -0.42f, 0.04f, 0 }, { -0.30f, -0.12f, 0 }, Rgb(236, 240, 252) });
-            sCatWing.push_back({ { 0, 0, 0 }, { -0.16f, 0.24f, 0 }, { -0.34f, 0.30f, 0 }, Rgb(246, 248, 255) });
+        case 3:     // wings; one wing, drawn once for each side. Tinted so they show on a white cat too.
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.42f, 0.46f, 0 }, { -0.56f, 0.12f, 0 }, Rgb(255, 244, 214) });
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.56f, 0.12f, 0 }, { -0.40f, -0.10f, 0 }, Rgb(255, 222, 232) });
+            sCatWing.push_back({ { 0, 0, 0 }, { -0.18f, 0.36f, 0 }, { -0.42f, 0.46f, 0 }, Rgb(255, 250, 236) });
             break;
     }
 }
@@ -1655,13 +1729,20 @@ static void BuildPathHeights()
 // Clock
 // ---------------------------------------------------------------------------
 
+// How well the game clock tracks the audio thread; reported by the end-to-end test.
+static int    gClockChecks = 0, gClockSnaps = 0;
+static double gClockDriftSum = 0.0, gClockDriftMax = 0.0;
+
 // Keeps the smooth game clock locked to the audio thread without inheriting its jitter.
 static void SyncClock()
 {
     double audio;
     if (!AudioPosition(audio)) return;
     const double drift = audio - (NowSeconds() - gClockBase);
-    if (std::fabs(drift) > 0.05) gClockBase -= drift;
+    gClockChecks++;
+    gClockDriftSum += std::fabs(drift);
+    gClockDriftMax = std::max(gClockDriftMax, std::fabs(drift));
+    if (std::fabs(drift) > 0.05) { gClockBase -= drift; gClockSnaps++; }
     else gClockBase -= drift * 0.02;
 }
 
@@ -1830,6 +1911,12 @@ static void StartGame()
     gCatAction = -1;
     gScroll = kScrollBase * gCfg.speed;
     gLatency = kBaseLatency + gCfg.offsetMs / 1000.0;
+    if (gLog) {   // the robot's plan: mostly on time, some a little late, every 25th skipped
+        gRobotPlan.resize(n);
+        gRobotDid.assign(n, 0.0f);
+        for (size_t i = 0; i < n; i++)
+            gRobotPlan[i] = i % 25 == 24 ? NAN : 0.012f * sinf((float)i * 1.7f) + (i % 7 == 3 ? 0.06f : 0.0f);
+    }
     gScene.envIndex = -1;
     SeekAndPlay(-kLeadIn);
     gState = ST_PLAYING;
@@ -1900,6 +1987,17 @@ static void Judge(int note, double error, double t)
     gJudgeKind = j;
     gJudgeAge = 0.0f;
     gComboPop = 1.0f;
+
+    if (gLog && note < (int)gRobotPlan.size()) {
+        // `error` is note time minus press time, so a press meant to be 10 ms late should measure -10 ms.
+        const double meant = -(double)gRobotPlan[note] * 1000.0, sent = -(double)gRobotDid[note] * 1000.0, measured = error * 1000.0;
+        const double off = std::fabs(measured - sent);   // what the input path itself adds
+        gHitErrorSum += off;
+        gHitErrorMax = std::max(gHitErrorMax, off);
+        gHitErrorCount++;
+        fprintf(gLog, "hit   note %3d  key %s  meant %+6.1f ms  sent %+6.1f ms  measured %+6.1f ms  -> %s\n", note, kActionKey[action], meant, sent, measured,
+                j == J_PERFECT ? "purrfect" : j == J_GREAT ? "nice" : "ok");
+    }
 
     const float power = j == J_PERFECT ? 1.0f : j == J_GREAT ? 0.65f : 0.4f;
     const Vector3 colour = kActionColor[action], white = { 1, 1, 1 };
@@ -1977,6 +2075,8 @@ static void Miss(int note, double t)
     gJudgeAge = 0.0f;
     CatDo(ACT_STUMBLE);
     PlaySfx(SFX_MISS);
+    if (gLog) fprintf(gLog, "miss  note %3d  key %s%s\n", note, kActionKey[gNoteAction[note]],
+                      note < (int)gRobotPlan.size() && std::isnan(gRobotPlan[note]) ? "  (on purpose)" : "  (NOT PLANNED)");
     gRig.flip = -gRig.flip;
     KickCamera(1.6f * gRig.flip, 0.0f, 0.35f * gRig.flip, -4.0f);   // a little wobble
     gEdgeColour = Vector3{ 0.6f, 0.62f, 0.75f };
@@ -2156,6 +2256,8 @@ static void UpdateScene(float dt, double t)
             gRig.vy += (-stiff * gRig.y - damp * gRig.vy) * h;             gRig.y += gRig.vy * h;
             gRig.vroll += (-stiff * gRig.roll - damp * gRig.vroll) * h;    gRig.roll += gRig.vroll * h;
             gRig.vzoom += (-stiff * gRig.zoom - damp * gRig.vzoom) * h;    gRig.zoom += gRig.vzoom * h;
+            gRigMax[0] = std::max(gRigMax[0], std::fabs(gRig.x));    gRigMax[1] = std::max(gRigMax[1], std::fabs(gRig.y));
+            gRigMax[2] = std::max(gRigMax[2], std::fabs(gRig.roll)); gRigMax[3] = std::max(gRigMax[3], std::fabs(gRig.zoom));
         }
         for (Spark& p : gSparks) {
             if (p.life <= 0.0f) continue;
@@ -2836,12 +2938,12 @@ static void DrawCat(float x, bool walking)
     if (gCfg.back == 1) {
         DrawShape(sCatBack, root, plain, lift2);
     } else if (gCfg.back == 2) {   // the balloon trails behind and bobs
-        const Matrix tied = MatrixMultiply(MatrixRotateZ(0.25f + 0.1f * sinf(gScene.time * 1.7f) + 0.05f * gScene.beat), MatrixTranslate(-0.08f, 0.66f, 0));
+        const Matrix tied = MatrixMultiply(MatrixRotateZ(0.25f + 0.1f * sinf(gScene.time * 1.7f) + 0.05f * gScene.beat), MatrixTranslate(-0.20f, 0.67f, 0));
         DrawShape(sCatBack, MatrixMultiply(tied, root), plain, 0.35f);
     } else if (gCfg.back == 3) {   // wings flutter, faster when happy
         const float flap = 0.35f + 0.45f * sinf(gScene.time * (7.0f + 6.0f * joy));
         for (int side = -1; side <= 1; side += 2) {
-            const Matrix wing = MatrixMultiply(MatrixRotateX(-side * (0.5f + flap)), MatrixTranslate(0.06f, 0.66f, side * 0.14f));
+            const Matrix wing = MatrixMultiply(MatrixRotateX(-side * (0.45f + flap)), MatrixTranslate(-0.08f, 0.64f, side * 0.17f));
             DrawShape(sCatWing, MatrixMultiply(wing, root), plain, 0.5f);
         }
     }
@@ -3934,6 +4036,65 @@ static void DrawFrame(double t)
 }
 
 // ---------------------------------------------------------------------------
+// End-to-end test
+// ---------------------------------------------------------------------------
+// `--robot log.txt` plays the demo track through the real game: real window,
+// real audio thread, and key presses injected through the operating system so
+// they arrive the way a keyboard's do. It starts the song with Enter, pauses
+// and resumes once with Esc and Enter, and follows gRobotPlan for the notes.
+
+static std::atomic<bool> gRobotStop{ false };
+static std::atomic<int>  gRobotSent{ 0 }, gRobotBlocked{ 0 };
+static std::atomic<int>  gRobotPauseSeen{ 0 };   // 1 if the game was paused when checked, -1 if it was not
+
+static void RobotThread(void* window)
+{
+    auto tap = [&](int virtualKey) {
+        if (!PlatformSendKey(window, virtualKey, true)) gRobotBlocked++;
+        PlatformSleep(0.05);
+        PlatformSendKey(window, virtualKey, false);
+    };
+    while (!gRobotStop && gState != ST_READY) PlatformSleep(0.05);
+    PlatformSleep(0.8);
+    tap(0x0D);   // Enter on the song screen starts the walk
+    while (!gRobotStop && gState != ST_PLAYING) PlatformSleep(0.02);
+
+    size_t next = 0;
+    bool pauseDone = false;
+    double release[4] = { 0, 0, 0, 0 };
+    while (!gRobotStop && gState != ST_RESULTS) {
+        if (gState != ST_PLAYING) { PlatformSleep(0.01); continue; }
+        const double now = NowSeconds(), song = now - gClockBase - gLatency;
+        for (int lane = 0; lane < 4; lane++)
+            if (release[lane] > 0.0 && now >= release[lane]) { PlatformSendLaneKey(window, lane, false); release[lane] = 0.0; }
+
+        if (!pauseDone && song > 12.0) {   // pause, check, resume
+            pauseDone = true;
+            tap(0x1B);
+            PlatformSleep(1.0);
+            gRobotPauseSeen = gState == ST_PAUSED ? 1 : -1;
+            tap(0x0D);
+            continue;
+        }
+        if (next >= gRobotPlan.size() || next >= gChart->time.size()) { PlatformSleep(0.01); continue; }
+        const float plan = gRobotPlan[next];
+        if (std::isnan(plan)) {   // let this one go by
+            if (song > gChart->time[next]) next++; else PlatformSleep(0.002);
+            continue;
+        }
+        const double due = gChart->time[next] + plan;
+        if (song < due - 0.003) { PlatformSleep(std::min(0.004, due - song - 0.002)); continue; }
+        while (NowSeconds() - gClockBase - gLatency < due) {}   // the last couple of milliseconds
+        const int lane = gNoteAction[next];
+        gRobotDid[next] = (float)(NowSeconds() - gClockBase - gLatency - gChart->time[next]);
+        if (PlatformSendLaneKey(window, lane, true)) gRobotSent++; else gRobotBlocked++;
+        release[lane] = NowSeconds() + 0.035;
+        next++;
+    }
+    for (int lane = 0; lane < 4; lane++) PlatformSendLaneKey(window, lane, false);
+}
+
+// ---------------------------------------------------------------------------
 // Self-test and entry point
 // ---------------------------------------------------------------------------
 
@@ -3983,13 +4144,16 @@ int main(int argc, char** argv)
     // --sfx-demo <wav>                writes a short audition of the sound effects
     // --shot <png> [--view menu|ready|play|pause|results|wardrobe|settings] [--at <seconds>] [--size WxH]
     //              [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n]
-    //              [--tab 0..3] [--closeup] [--unlock-all] [--count]
+    //              [--tab 0..3] [--closeup] [--unlock-all] [--count] [--seq n] [--seq-step frames]
+    // --robot <log>                   end-to-end test: plays the demo with real key presses, silently, and logs what it measured
+    // --sfx-dump <folder>             writes every sound effect as its own WAV
     //                                 renders offscreen with a simulated clock and saves one frame
     const char* shotPath = nullptr;
     std::string songPath;
     std::string shotView = "play";
     double shotAt = 12.0;
-    int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1;
+    int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
+    const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
         if (!strcmp(argv[i], "--sfx-demo") && i + 1 < argc) return WriteSfxDemo(argv[i + 1]) ? 0 : 1;
@@ -4006,6 +4170,10 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--tab") && i + 1 < argc) gWardrobeTab = gSettingsTab = std::clamp(atoi(argv[++i]), 0, 3);
         else if (!strcmp(argv[i], "--unlock-all")) gUnlockAll = true;
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
+        else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
+        else if (!strcmp(argv[i], "--seq") && i + 1 < argc) seqLeft = std::max(0, atoi(argv[++i]) - 1);
+        else if (!strcmp(argv[i], "--seq-step") && i + 1 < argc) seqStep = std::max(1, atoi(argv[++i]));
+        else if (!strcmp(argv[i], "--sfx-dump") && i + 1 < argc) return WriteSfxFiles(argv[i + 1]) ? 0 : 1;
         else if (!strcmp(argv[i], "--closeup")) gCloseup = true;
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &winW, &winH);
         else if (argv[i][0] != '-') songPath = argv[i];
@@ -4030,6 +4198,14 @@ int main(int argc, char** argv)
         LoadSettings();
         LoadLibrary();
         LoadProgress();
+        if (robotLog) {
+            gLog = fopen(robotLog, "w");
+            gKeepSettings = true;
+            SetMasterVolume(0.0f);   // the whole audio path runs, but nothing is heard
+            gCfg.watch = false;
+            gCfg.diff = shotDiff >= 0 ? std::clamp(shotDiff, 0, 2) : DIFF_NORMAL;
+            gCfg.scenery = 0;
+        }
         PlatformStartKeyInput(GetWindowHandle());
     } else {
         if (shotDiff >= 0) gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
@@ -4078,9 +4254,18 @@ int main(int argc, char** argv)
             if (gState != ST_READY) printf("load failed: %s\n", gError.c_str());
             else if (shotView != "ready") StartGame();
         }
+    } else if (robotLog) {
+        if (gLog) fprintf(gLog, "window in front: %s\n", PlatformFocusWindow(GetWindowHandle()) ? "yes" : "NO");
+        if (songPath.empty()) BeginLoad("", true);
+        else BeginLoad(songPath, false);
     } else if (!songPath.empty()) {
         BeginLoad(songPath, false);
     }
+    std::thread robot;
+    if (gLog) robot = std::thread(RobotThread, GetWindowHandle());
+    const double robotStart = NowSeconds();
+    double robotDone = 0.0, slowest = 0.0, frameSum = 0.0;
+    int frameCount = 0, slowFrames = 0;
 
     bool quit = false;
     while (!quit && (gSim || !WindowShouldClose())) {
@@ -4098,6 +4283,12 @@ int main(int argc, char** argv)
             PlatformSleep(nextFrame - now);
             now = NowSeconds();
             dt = (float)std::clamp(now - frameStart, 0.0005, 0.1);
+            if (gLog && gState == ST_PLAYING) {   // how evenly frames arrive while playing
+                const double frame = now - frameStart;
+                frameSum += frame; frameCount++;
+                slowest = std::max(slowest, frame);
+                slowFrames += frame > 0.020;
+            }
             frameStart = now;
         }
         UpdateCanvas();
@@ -4123,6 +4314,7 @@ int main(int argc, char** argv)
                 t = SongTime();
                 UpdatePlaying(t);
                 if (gState == ST_PLAYING && !gSim && (Key(KEY_ESCAPE) || Key(KEY_P) || !IsWindowFocused())) {
+                    if (gLog) fprintf(gLog, "pause at %.2f s (%s)\n", t, IsWindowFocused() ? "key" : "WINDOW LOST FOCUS");
                     gPlayer.playing.store(false);
                     gPausedAt = t;
                     memset(gHeld, 0, sizeof(gHeld));
@@ -4138,6 +4330,43 @@ int main(int argc, char** argv)
         if (gState != ST_PLAYING) { LaneKeyEvent drop[32]; while (PlatformPollKeys(drop, 32) == 32) {} }
 
         UpdateScene(dt, t);
+
+        if (gLog) {   // end-to-end test: report once the walk is over, or give up
+            const bool timedOut = NowSeconds() - robotStart > 120.0;
+            if ((gState == ST_RESULTS || timedOut) && robotDone == 0.0) {
+                robotDone = NowSeconds();
+                const double played = std::max(1.0, robotDone - robotStart);
+                fprintf(gLog, "\n%s\n", timedOut ? "TIMED OUT before the song ended" : "song finished");
+                fprintf(gLog, "keys: %d sent, %d blocked (window not in front); read through %s\n", gRobotSent.load(), gRobotBlocked.load(),
+                        gRawKeys ? "the raw input thread" : "per-frame polling");
+                fprintf(gLog, "timing: %d hits, sent vs measured differs by %.2f ms on average, %.2f ms at worst\n", gHitErrorCount,
+                        gHitErrorCount ? gHitErrorSum / gHitErrorCount : 0.0, gHitErrorMax);
+                fprintf(gLog, "result: score %d, %d purrfect, %d nice, %d ok, %d miss, best streak %d, accuracy %.1f%%\n", gScore, gCount[0], gCount[1], gCount[2],
+                        gCount[3], gMaxCombo, Accuracy() * 100.0f);
+                fprintf(gLog, "pause and resume: %s\n", gRobotPauseSeen == 1 ? "paused when checked, then resumed" : gRobotPauseSeen == -1 ? "DID NOT PAUSE" : "not reached");
+                fprintf(gLog, "audio: %llu callbacks (%.0f per second), %.0f frames per second for a %d Hz stream\n", (unsigned long long)gAudioCallbacks.load(),
+                        gAudioCallbacks.load() / played, gAudioFrames.load() / played, gPlayer.sampleRate.load());
+                fprintf(gLog, "audio: %.1f s of the song sent to the device, %.0f%% of it above silence; %llu sound effects started\n",
+                        (double)gAudioSongFrames.load() / gPlayer.sampleRate, 100.0 * gAudioLoudFrames.load() / std::max<uint64_t>(1, gAudioSongFrames.load()),
+                        (unsigned long long)gSfxStarted.load());
+                fprintf(gLog, "audio: the limiter rounded off %llu samples (%.3f%% of what was sent)\n", (unsigned long long)gAudioLimited.load(),
+                        100.0 * gAudioLimited.load() / std::max<uint64_t>(1, gAudioFrames.load() * 2));
+                fprintf(gLog, "clock: %d checks against the audio thread, drift %.2f ms on average, %.2f ms at worst, %d resyncs\n", gClockChecks,
+                        gClockChecks ? gClockDriftSum / gClockChecks * 1000.0 : 0.0, gClockDriftMax * 1000.0, gClockSnaps);
+                fprintf(gLog, "frames while playing: %d, %.2f ms on average (%.0f per second), slowest %.1f ms, %d over 20 ms\n", frameCount,
+                        frameCount ? frameSum / frameCount * 1000.0 : 0.0, frameCount ? frameCount / frameSum : 0.0, slowest * 1000.0, slowFrames);
+                fprintf(gLog, "camera: pushed at most %.2f sideways, %.2f up or down, %.1f degrees of roll, %.1f degrees of zoom; at rest now: %s\n", gRigMax[0],
+                        gRigMax[1], gRigMax[2] * 57.2958f, gRigMax[3],
+                        std::fabs(gRig.x) + std::fabs(gRig.y) + std::fabs(gRig.roll) + std::fabs(gRig.zoom) < 0.05f ? "yes" : "NO");
+                fprintf(gLog, "unlocked by this walk: %d item(s)", (int)gNewUnlocks.size());
+                for (int index : gNewUnlocks) fprintf(gLog, "  [%s]", kItems[index].name);
+                fprintf(gLog, "\nprogress now: %d song(s), %d purrfect, best streak %d, best rank %d, places mask %d\n", gProgress.songs, gProgress.perfects,
+                        gProgress.bestStreak, gProgress.bestRank, gProgress.places);
+                if (const SongEntry* e = FindSong(gSongPath)) fprintf(gLog, "library: \"%s\" best on difficulty %d: %.4f, score %d\n", e->name.c_str(), gCfg.diff, e->best[gCfg.diff], e->score[gCfg.diff]);
+                fflush(gLog);
+            }
+            if (robotDone > 0.0 && NowSeconds() - robotDone > 1.5) quit = true;
+        }
 
         if (!gSim && (IsWindowMinimized() || PlatformWindowMinimized(GetWindowHandle()))) {   // nothing to show: keep the events flowing and doze
             PollInputEvents();
@@ -4165,9 +4394,13 @@ int main(int argc, char** argv)
                 Image image = LoadImageFromTexture(gCanvas.texture);
                 ImageFlipVertical(&image);
                 ImageResizeNN(&image, image.width * gPixel, image.height * gPixel);
-                ExportImage(image, shotPath);
+                // With --seq, several frames are saved a few frames apart: name_0.png, name_1.png, ...
+                std::string path = shotPath;
+                if (seqLeft > 0 || seqIndex > 0) path = path.substr(0, path.rfind('.')) + TextFormat("_%d.png", seqIndex);
+                ExportImage(image, path.c_str());
                 UnloadImage(image);
-                quit = true;
+                if (seqLeft > 0) { seqLeft--; seqIndex++; shotHold = seqStep; }
+                else quit = true;
             }
         } else {
             BeginDrawing();
@@ -4178,6 +4411,9 @@ int main(int argc, char** argv)
         }
     }
 
+    gRobotStop = true;
+    if (robot.joinable()) robot.join();
+    if (gLog) fclose(gLog);
     gPlayer.playing.store(false);
     if (gJob.thread.joinable()) gJob.thread.join();
     gPlayer.pcm.Free();

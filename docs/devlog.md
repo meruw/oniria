@@ -2,6 +2,29 @@
 
 Newest entries first.
 
+## 2026-11-13: clothes that fit, and a test that presses real keys
+
+**Cosmetics.** Hats were placed by eye at fixed heights and several sank into the head or hovered over it; the beanie's cuff was a plate. They are now built from ellipses that follow the head's own shape. Collars, the bow tie, the scarf, the bandana and the garland were level rings, which the oversized head simply hid; they now lie in a plane that leans forward, so the front half shows under the chin. The backpack was a box mostly behind the head; it is a rounded bag further back, with a flap, pockets and a button. The scarf's hanging end reached the paws and looked like a post; it is a short tail on the chest. Wings got some colour so they show on the white cat.
+
+**An end-to-end test.** Every devlog entry so far ended with "not checked with real input and real audio". `--robot` closes most of that: the game runs normally but silently, and a thread presses real keys through the operating system following the chart, some on time, some deliberately late, some skipped, with a pause and resume in the middle. Four runs, 492 key presses:
+
+- every key arrived through the raw input thread; on the two runs that logged it (306 presses), the time the game gave each press was 0.5 ms from when it was sent on average and 1.5 ms at worst;
+- all 492 hits were judged in the window their timing falls in, and the 18 misses were exactly the 18 planned ones;
+- the audio callback ran 100 times a second and delivered the whole song; the game clock stayed 0.2 ms from the audio thread on average (6 to 10 ms at its worst moment in each run) and never had to resync;
+- 120 frames a second, roughly 10 to 15% of one core on Playful and 20 to 25% on Zoomies, 80 to 90 MB;
+- scores, the library and lifetime progress were written to disk and read back by the next run; unlocks were announced;
+- on the run that logged it, the camera never moved more than 0.2 units, 2 degrees of roll or 2.7 degrees of zoom, and was back at rest at the end.
+
+**What the test found.** The first run finished the song and then never exited. The frame limiter slept on one waitable timer shared by the whole process; with a second thread sleeping too, each re-armed the timer under the other and one of them waited forever. The game alone has a single sleeping thread, so it had not bitten yet, but it would have the day anything else slept. Each thread now has its own timer and the wait is bounded. That first run also had five frames over 20 ms; the three runs after the fix had two, none and one.
+
+**Rounder peaks.** Looking at the audio path for the test showed that the final stage clamped the mix. A loud song plus a few effects would have clipped flat. It now eases into the top with a `tanh` curve above 0.8; on the demo track at the highest difficulty that touched 0.03% of samples.
+
+**The sounds, measured.** Each effect was written out and analysed: peak 0.85 with no clipped samples, no DC offset, attacks between 3 and 13 ms (the milestone arpeggio swells over 98 ms), and essentially nothing above 4 kHz. They are close to pure tones: 262 Hz for the hop and the bat, 523 Hz for the swat and the bell, 1046 Hz for the twinkle. Soft is confirmed; whether they are *satisfying* still needs ears.
+
+**Unlock pace, with numbers.** Four short walks (three minutes of music) unlocked six of the 20 things to earn. The items tied to perfect hits go fastest: at the demo track's density a three-minute song on Playful has about 430 notes, so one good walk can clear the 50, 150 and 300 thresholds together. Those three numbers are probably too low; they are unchanged for now.
+
+**Still needs a person:** how the timing feels on a real keyboard and through real speakers (injected keys skip the keyboard, and the delay after the audio callback cannot be measured from inside), whether the sounds please, and charts on real music.
+
 ## 2026-11-13: kittens, a wardrobe and a settings screen
 
 **Cuter cats.** The cats were recognisable but not cute. What changed the read most was not detail but proportion and angle: a head nearly as big as the body, eyes much larger and set low and wide, a short round body, stubby legs with big paws, and the head turned to a three-quarter view so both eyes always face the player. Then the small things: two highlights in each eye, rosy cheeks, a mouth, whiskers, cheek fur. The first cheeks were boxes and stuck out like bricks in the close-up; they are flattened blobs set into the cheek now. The face is also lit flatter than the body so it never goes grey in shade.

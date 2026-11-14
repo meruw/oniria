@@ -29,3 +29,6 @@ float SfxStreakSemitones(int streak);
 
 // Renders a short audition (a rising streak, a milestone, a miss) to a 16-bit WAV.
 bool WriteSfxDemo(const char* path);
+
+// Writes every sound on its own (hop.wav, bat.wav, ...) into `folder`, which must exist.
+bool WriteSfxFiles(const char* folder);

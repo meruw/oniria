@@ -54,9 +54,9 @@ The **Wardrobe** (from the main menu, or `C`) brings the camera in close and let
 
 Nothing is bought and nothing is random. Watch mode does not count. The results screen tells you what a walk unlocked, or what is next within reach.
 
-| Flower crown | Beanie, scarf and balloon |
-| --- | --- |
-| ![Flower crown](docs/img/wardrobe-crown.png) | ![Beanie, scarf and balloon](docs/img/wardrobe-balloon.png) |
+| Flower crown | Beanie, scarf and balloon | Straw hat, scarf and backpack |
+| --- | --- | --- |
+| ![Flower crown](docs/img/wardrobe-crown.png) | ![Beanie, scarf and balloon](docs/img/wardrobe-balloon.png) | ![Straw hat, scarf and backpack](docs/img/wardrobe-backpack.png) |
 
 ### Settings
 
@@ -112,6 +112,8 @@ Measured on Windows with the release build:
 | Executable | 1.2 MB, no other files to ship |
 | Memory | 65 to 75 MB with the menu open, plus roughly 10 MB per minute of the loaded song |
 | CPU, menu open | 6 to 10% of one core (about 3% of that is the audio device thread) |
+| CPU, playing at 120 frames per second | roughly 10 to 15% of one core on Playful, 20 to 25% on Zoomies |
+| Memory, playing | 80 to 90 MB with a song of under a minute loaded |
 | CPU, minimized | about 5% of one core; nothing is drawn |
 | Frame cost | about 1.4 ms of CPU per frame; the 3D scene is drawn into a 640x360 canvas |
 
@@ -149,11 +151,23 @@ The long version is in [docs/how-it-works.md](docs/how-it-works.md), and the sto
 
 ## What is verified so far
 
-- The analysis is tested against the demo track, whose notes sit on a known grid: detected onsets land 3 ms from the grid on average (`oniria.exe --selftest`).
-- Every screen has been rendered offscreen with a simulated clock and inspected (`oniria.exe --shot out.png --view play --at 20`).
-- The real game starts, opens the audio device and runs.
+- **Analysis.** Tested against the demo track, whose notes sit on a known grid: detected onsets land 3 ms from the grid on average (`oniria.exe --selftest`).
+- **Every screen** has been rendered offscreen with a simulated clock and inspected (`oniria.exe --shot out.png --view play --at 20`), including frame-by-frame sequences around hits.
+- **The real game, end to end** (`oniria.exe --robot log.txt`). A test thread presses real keys through the operating system while the game runs normally with its volume at zero, then the game reports what it measured. Over four runs (a WAV file twice, the demo track on Playful and on Zoomies):
 
-Not yet verified by a person playing: how the timing feels with real key presses and real audio output, the default latency value, how the sound effects actually sound (they have only been checked for level and length), and how well the charts fit music other than the demo track.
+  | | |
+  | --- | --- |
+  | Key presses | 492 sent, 492 received through the raw input thread, none lost |
+  | Input timing | the time the game assigns to a press is 0.5 ms from when it was sent on average, 1.5 ms at worst (logged on the last two runs, 306 presses) |
+  | Judgement | all 492 hits were judged in the window their timing falls in; the 18 misses were exactly the 18 planned ones |
+  | Audio | callback 100 times a second, the whole song delivered; the game clock stayed 0.2 ms from the audio thread on average (10 ms at its worst moment) and never had to resync |
+  | Frames | 120 per second, 8.33 ms on average; at most two frames over 20 ms in a run |
+  | Pause and resume | pauses on Esc, resumes on Enter, timing unaffected afterwards |
+  | Saving | best score, library entry and lifetime progress written to disk and read back by the next run; unlocks announced |
+
+- **Sound effects** were measured rather than heard: no clipping, no DC offset, attacks of 3 to 13 ms (no clicks), and practically no energy above 4 kHz.
+
+Still not verified, because it needs a person: how the timing *feels* (injected keys skip the keyboard itself, and the delay between the audio callback and the speakers cannot be measured from inside the program, which is what the audio offset setting is for), whether the sounds are pleasant, how well the charts fit music other than the two test tracks, and whether the unlock pace feels right.
 
 ## Project layout
 

@@ -114,9 +114,11 @@ When a song ends, the unlock state of every item is taken before and after addin
 
 What the cat wears is three more shapes built by `BuildCat`: one in head space (so hats follow the head as it turns and nods), and two in body space. Wings and the balloon are posed separately so they can flutter and sway.
 
+The head is close to an ellipsoid, so hats are lofts of ellipses that follow it: a brim is a ring at the height where the head is that wide, a beanie's cuff hugs it just above the eyes. The head is also so large that a level collar would be hidden inside it, so everything worn round the neck lies in a plane that leans forward, high behind the head and low under the chin, where it shows as a curve across the chest. Things on the back sit behind the point where the head stops covering it.
+
 ## Staying light
 
-- **Frame pacing.** The game sleeps on a high-resolution waitable timer until the next frame is due: 120 frames a second while playing, 60 in menus, 30 in the background, and no drawing at all while minimized. V-sync is still requested, but it is not relied on: a driver can switch it off, and the first measurement of the menu showed the loop spinning more than a whole core for exactly that reason. raylib's own limiter was avoided because it busy-waits part of every frame.
+- **Frame pacing.** The game sleeps on a high-resolution waitable timer (one per thread) until the next frame is due: 120 frames a second while playing, 60 in menus, 30 in the background, and no drawing at all while minimized. V-sync is still requested, but it is not relied on: a driver can switch it off, and the first measurement of the menu showed the loop spinning more than a whole core for exactly that reason. raylib's own limiter was avoided because it busy-waits part of every frame.
 - **Memory.** A song is decoded once into 16-bit stereo and that buffer is used directly for playback; it is never copied. The analysis reads it in place through a sliding window instead of first building a mono copy of the whole track.
 - **Startup.** Sound effects are synthesized with phasor recurrences rather than calling `sin` and `exp` per sample.
 - **Drawing.** A few thousand flat triangles lit on the CPU, into a 640x360 canvas, in a handful of batches. No textures, no model files, no custom shaders.
@@ -126,6 +128,8 @@ What the cat wears is three more shapes built by `BuildCat`: one in head space (
 `src/sfx.cpp` builds eight short sounds at startup from decaying sine partials: a marimba bar, a pitch-sliding "bloop", a kalimba tine, a small bell with two detuned fundamentals, a two-note music-box twinkle, a muted thud for misses, a music-box arpeggio for milestones and a menu tick. Each one goes through a low-pass filter around 5.5 kHz and gets a quiet, darker two-tap echo, which is what keeps them soft.
 
 They are mixed inside the same audio callback that plays the song, so they have the same latency as the music. The game thread only pushes small commands (sound, pitch, gain) onto a lock-free queue; up to sixteen voices are resampled and summed on the audio thread.
+
+A loud song with a few effects on top can pass full scale. The last step of the callback leaves everything below 0.8 untouched and eases anything above it towards 1.0 with a `tanh` curve, so peaks are rounded off instead of clipped flat.
 
 The hit sound's pitch depends on the streak: the first eight hits climb a major pentatonic scale, and from then on a fixed eight-note figure near the top keeps repeating, so a long streak sounds like a tune and never keeps rising. All four instruments share the same pitch, so two notes at once always sound in unison or an octave apart.
 
@@ -147,4 +151,6 @@ Two command-line modes exist for automated checks:
 
 - `oniria.exe --selftest` analyzes the demo track and prints note counts and timing error against its known grid, plus the length and level of every sound effect.
 - `oniria.exe --sfx-demo out.wav` writes sixteen perfect hits in a row, a milestone and a miss, for listening to the sounds outside the game.
-- `oniria.exe --shot out.png [--view menu|ready|play|pause|results|wardrobe|settings] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n] [--tab 0..3] [--unlock-all] [--count] [--closeup] [--size WxH] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame. Without a song file it uses the demo track.
+- `oniria.exe --sfx-dump folder` writes each sound effect as its own WAV, for measuring them.
+- `oniria.exe --robot log.txt [--diff 0..2] [song file]` is the end-to-end test. The game runs for real, with its window, its audio thread and its raw input thread, but with the master volume at zero. A second thread waits for the song screen, presses Enter, and then presses D F J K through `SendInput` at the times the chart asks for, deliberately a little early or late on some notes and skipping every twenty-fifth; a third of the way in it pauses with Esc and resumes with Enter. Keys are only sent while the game window is in front, so they cannot land in another program. When the song ends the game writes what it measured: for each note the timing that was meant, when the key was really sent and what the game measured; then totals for input, audio, clock drift, frame times, camera travel, unlocks and what was saved. It does not write the settings file.
+- `oniria.exe --shot out.png [--view menu|ready|play|pause|results|wardrobe|settings] [--at seconds] [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n] [--tab 0..3] [--unlock-all] [--count] [--closeup] [--size WxH] [--seq n] [--seq-step frames] [song file]` renders offscreen with a simulated clock, in watch mode, and saves one frame, or with `--seq` a run of frames a few steps apart (`out_0.png`, `out_1.png`, ...) for looking at motion. Without a song file it uses the demo track.

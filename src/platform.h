@@ -36,6 +36,14 @@ bool PlatformWindowMinimized(void* window);
 // Sleeps without burning CPU. Accurate to well under a millisecond on Windows 10 and later.
 void PlatformSleep(double seconds);
 
+// For the end-to-end test (--robot): bring the window to the front, and press
+// real keys through the operating system, exactly as a keyboard would. Keys
+// are only sent while the game window is in front, so they can never land in
+// another program. Both return false if the window is not in front.
+bool PlatformFocusWindow(void* window);
+bool PlatformSendLaneKey(void* window, int lane, bool down);
+bool PlatformSendKey(void* window, int virtualKey, bool down);
+
 bool PlatformStartKeyInput(void* gameWindow);
 void PlatformStopKeyInput();
 int  PlatformPollKeys(LaneKeyEvent* out, int maxEvents);
