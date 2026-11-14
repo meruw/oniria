@@ -12,6 +12,7 @@ enum Difficulty { DIFF_GENTLE = 0, DIFF_NORMAL = 1, DIFF_INTENSE = 2, DIFF_COUNT
 struct Chart {
     std::vector<double>  time;   // seconds from the start of the song
     std::vector<uint8_t> lane;   // 0..3
+    std::vector<float>   hold;   // seconds to keep the key down after the hit; 0 for an ordinary note
 };
 
 struct SongAnalysis {

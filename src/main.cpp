@@ -2042,7 +2042,15 @@ static void LoadWorker(std::string path, bool demo)
     gJob.stage.store(3);
 }
 
-static const int kTutorialParts = 5, kTutorialBeats = 16;   // sixteen beats a part; the first four are for reading
+// Long notes: a ball of yarn with a thread trailing behind it. Batting it and
+// keeping the key down reels the thread in. Holding to the end is a bonus;
+// letting go early costs nothing but that bonus.
+static int    gHoldNote = -1;          // the long note being held, if any (they are always yarn, so one at a time)
+static double gHoldNext = 0.0;         // when the next little reward for holding is due
+static int    gHoldsDone = 0, gHoldsTotal = 0;
+static float  HoldOf(int i) { return gChart && i >= 0 && i < (int)gChart->hold.size() ? gChart->hold[i] : 0.0f; }
+
+static const int kTutorialParts = 6, kTutorialBeats = 16;   // sixteen beats a part; the first four are for reading
 static int    gTutorialFirst[kTutorialParts + 1];           // the first note of each part
 static int    gTutorialTries[kTutorialParts], gTutorialPart = 0;
 static double gTutorialAgainUntil = -1.0;                   // song time until which "once more" is shown
@@ -2056,9 +2064,10 @@ static void BuildTutorialCharts(SongAnalysis& song)
     Chart chart;
     for (int part = 0; part < kTutorialParts; part++) {
         gTutorialFirst[part] = (int)chart.time.size();
-        for (int beat = 4; beat < kTutorialBeats; beat += part < 4 ? 2 : 1) {
+        for (int beat = 4; beat < kTutorialBeats; beat += part == 5 ? 4 : part < 4 ? 2 : 1) {
             chart.time.push_back(TutorialPartStart(part) + beat * TutorialBeat());
-            chart.lane.push_back(part < 4 ? (uint8_t)part : kMix[(beat - 4) % 12]);
+            chart.lane.push_back(part == 5 ? (uint8_t)ACT_BAT : part < 4 ? (uint8_t)part : kMix[(beat - 4) % 12]);
+            chart.hold.push_back(part == 5 ? (float)(2.0 * TutorialBeat()) : 0.0f);   // the last part is long notes
         }
     }
     gTutorialFirst[kTutorialParts] = (int)chart.time.size();
@@ -2141,6 +2150,10 @@ static void StartGame()
     gNoteWhen.assign(n, 0.0f);
     gNoteAction.resize(n);
     for (size_t i = 0; i < n; i++) gNoteAction[i] = gTutorial ? gChart->lane[i] : (uint8_t)kLaneAction[gCfg.diff][gChart->lane[i]];
+    gHoldNote = -1;
+    gHoldsDone = gHoldsTotal = 0;
+    for (size_t i = 0; i < n; i++)
+        if (HoldOf((int)i) > 0.0f) { gNoteAction[i] = ACT_BAT; gHoldsTotal++; }   // every long note is yarn
     EnsureToday();   // so the places this walk passes count for today's goals
     memset(gTutorialTries, 0, sizeof(gTutorialTries));
     gTutorialPart = 0;
@@ -2250,6 +2263,7 @@ static void Judge(int note, double error, double t)
     gJudgeKind = j;
     gJudgeAge = 0.0f;
     gComboPop = 1.0f;
+    if (HoldOf(note) > 0.0f) { gHoldNote = note; gHoldNext = t + 0.15; }
 
     if (gLog && note < (int)gRobotPlan.size()) {
         // `error` is note time minus press time, so a press meant to be 10 ms late should measure -10 ms.
@@ -2468,6 +2482,34 @@ static void UpdatePlaying(double t)
                 if (Key(kKeyA[a]) || Key(kKeyB[a])) Press(a, t);
                 gHeld[a] = IsKeyDown(kKeyA[a]) || IsKeyDown(kKeyB[a]);
             }
+        }
+    }
+
+    if (gHoldNote >= 0) {   // a long note in progress
+        const double from = gChart->time[gHoldNote], end = from + HoldOf(gHoldNote);
+        const bool down = gCfg.watch || gHeld[ACT_BAT];
+        const Vector3 at = { gScene.worldX + kReach, PathHeight(gScene.worldX + kReach) + 0.4f, 0.0f };
+        if (t >= end - 0.15 && down) {          // kept to the end (letting go a touch early still counts)
+            gScore += 250;
+            gHoldsDone++;
+            gStreak += 0.5f;
+            gJoyKick = 1.0f;
+            PlaySfx(SFX_TWINKLE, 7.0f, 1.0f);
+            Burst(at, kActionColor[ACT_BAT], 8);
+            AddRing(at, kActionColor[ACT_BAT], 1.1f, 0.5f, true);
+            if (gLog) fprintf(gLog, "hold  note %3d  kept down for the whole %.2f s -> bonus\n", gHoldNote, HoldOf(gHoldNote));
+            gNoteWhen[gHoldNote] = (float)t;   // the ball rolls off now
+            gHoldNote = -1;
+        } else if (!down || t >= end) {
+            if (gLog) fprintf(gLog, "hold  note %3d  let go after %.2f s of %.2f s -> no bonus, no penalty\n", gHoldNote, t - from, HoldOf(gHoldNote));
+            gNoteWhen[gHoldNote] = (float)t;
+            gHoldNote = -1;
+        } else if (t >= gHoldNext) {            // a little something for every moment held
+            gHoldNext += 0.15;
+            gScore += 12;
+            Burst(at, kActionColor[ACT_BAT], 1);
+            const int step = (int)((t - from) / 0.3);
+            if (((int)((t - from) / 0.15) & 1) == 0) PlaySfx(SFX_TWINKLE, (float)(step * 2), 0.3f);
         }
     }
 
@@ -3349,6 +3391,28 @@ static void DrawNotes(double t)
                 DrawShape(sLog, Place(at, 1.0f, 0.0f, hit ? 1.0f + 0.25f * expf(-since * 8.0f) * cosf(since * 30.0f) : 1.0f), tint);
                 break;
             case ACT_BAT: {
+                const float hold = HoldOf(i);
+                if (hold > 0.0f && (state == 0 || gHoldNote == i)) {
+                    // The thread lies along the path from the ball to where the long note ends; it is reeled in as it is held.
+                    const float tail = (float)(gChart->time[i] + hold) * gScroll + kReach;
+                    const float head = gHoldNote == i ? std::max(at.x, gScene.worldX + kReach) : at.x;
+                    const Vector3 thread = Vector3Multiply(kActionColor[ACT_BAT], tint), pale = Vector3Multiply(Vector3{ 1.0f, 0.86f, 0.9f }, tint);
+                    const float w = 0.07f;
+                    int k = 0;
+                    for (float xa = head; xa < tail; xa += 0.25f, k++) {
+                        const float xb = std::min(tail, xa + 0.25f);
+                        const float za = 0.13f * sinf(xa * 4.0f), zb = 0.13f * sinf(xb * 4.0f), ya = PathHeight(xa) + 0.07f, yb = PathHeight(xb) + 0.07f;
+                        const Vector3 a = { xa, ya, za - w }, b = { xa, ya, za + w }, c = { xb, yb, zb + w }, d = { xb, yb, zb - w };
+                        EmitTri(a, b, c, (k & 1) ? thread : pale, 0.35f);
+                        EmitTri(a, c, d, (k & 1) ? thread : pale, 0.35f);
+                    }
+                    DrawShape(sYarn, Place(Vector3{ tail, PathHeight(tail) + 0.14f, 0.13f * sinf(tail * 4.0f) }, 0.45f), tint);   // the loose end
+                    if (gHoldNote == i) {   // the ball trundles along just ahead of the cat
+                        const float px = gScene.worldX + kReach + 0.15f;
+                        DrawShape(sYarn, Place(Vector3{ px, PathHeight(px) + 0.25f + 0.05f * fabsf(sinf(px * 6.0f)), 0 }, 1.0f, -px * 4.0f), tint);
+                        break;
+                    }
+                }
                 if (hit && since > 0.7f) break;
                 // Batted yarn rolls off ahead of the cat and shrinks away.
                 const float roll = hit ? since : 0.0f;
@@ -4356,14 +4420,14 @@ static void DrawHud(double t)
     }
     if (gTutorial) {
         static const char* kTeach[kTutorialParts] = { "Logs: press D to hop over them", "Yarn balls: press F to bat them", "Butterflies: press J to swat at them",
-                                                      "Bells: press K to ring them", "Now all four together!" };
+                                                      "Bells: press K to ring them", "Now all four together!", "Long yarn: press F and keep it down to the end" };
         const int part = t < TutorialPartStart(0) ? -1 : (int)((t - TutorialPartStart(0)) / (kTutorialBeats * TutorialBeat()));
         std::string line = part < 0 ? "Things come along the path in time with the music" : part >= kTutorialParts ? "That is all there is to it. Enjoy the walk!" : kTeach[part];
         if (t < gTutorialAgainUntil) line = "Once more.  " + line;
-        const bool icon = part >= 0 && part < 4;
+        const bool icon = part >= 0 && part != 4 && part < kTutorialParts;
         const int w = MeasureText(line.c_str(), 10) + (icon ? 40 : 20), y = 56;
         Card(cx - w / 2, y, w, 20, kPaper, kLine);
-        if (icon) ActionIcon(part, cx - w / 2 + 14, y + 10);
+        if (icon) ActionIcon(part == 5 ? (int)ACT_BAT : part, cx - w / 2 + 14, y + 10);
         Text(line.c_str(), cx + (icon ? 10 : 0), y + 5, 10, kCocoa, 1, false);
     }
     Text(TextFormat("%.1f%%", Accuracy() * 100.0f), gVW - 10, 8, 10, kInk, 2);
@@ -4382,7 +4446,12 @@ static void DrawHud(double t)
             DrawRectangle(x - 6, y - 1, 12, 12, kShade);
             DrawRectangleLines(x - 6, y - 1, 12, 12, ToColor(kActionColor[gNoteAction[i]]));
             Text(kActionKey[gNoteAction[i]], x + 1, y + 1, 10, kInk, 1, false);
+            if (HoldOf(i) > 0.0f) Text("hold", x + 1, y - 12, 10, kInk, 1);
         }
+    }
+    if (gHoldNote >= 0 && gState == ST_PLAYING) {
+        const Vector2 p = GetWorldToScreenEx(Vector3{ gScene.worldX + 0.3f, PathHeight(gScene.worldX) + 2.0f, 0 }, gCamera, gVW, gVH);
+        Text("keep holding", (int)p.x, (int)p.y, 10, Color{ 255, 214, 230, 255 });
     }
 
     // Key legend along the bottom; a key lights up while it is held.
@@ -4444,7 +4513,9 @@ static void DrawResults()
     Text(kWords[rank], cx, top + 66, 10, kCocoa, 1, false);
     Text(Fit(gSongName, 10, pw - 32).c_str(), cx, top + 80, 10, kCocoaSoft, 1, false);
     Text(TextFormat("%d", gScore), cx, top + 98, 20, kCocoa, 1, false);
-    Text(TextFormat("%.1f%% in time  -  best streak %d", acc * 100.0f, gMaxCombo), cx, top + 124, 10, kCocoa, 1, false);
+    Text(gHoldsTotal > 0 ? TextFormat("%.1f%% in time  -  streak %d  -  long yarn %d/%d", acc * 100.0f, gMaxCombo, gHoldsDone, gHoldsTotal)
+                         : TextFormat("%.1f%% in time  -  best streak %d", acc * 100.0f, gMaxCombo),
+         cx, top + 124, 10, kCocoa, 1, false);
 
     static const char* kLabel[4] = { "Purrfect", "Nice", "Ok", "Miss" };
     const int colW = (pw - 32) / 4;
@@ -5059,7 +5130,10 @@ static void RobotThread(void* window)
         const int lane = gNoteAction[next];
         gRobotDid[next] = (float)(NowSeconds() - gClockBase - gLatency - gChart->time[next]);
         if (PlatformSendLaneKey(window, lane, true)) gRobotSent++; else gRobotBlocked++;
+        const float hold = HoldOf((int)next);
+        static int longNotes = 0;
         release[lane] = NowSeconds() + 0.035;
+        if (hold > 0.0f) release[lane] += (longNotes++ & 1) ? hold * 0.4 : hold + 0.1;
         next++;
     }
     for (int lane = 0; lane < 4; lane++) PlatformSendLaneKey(window, lane, false);
@@ -5134,6 +5208,16 @@ static int SelfTest()
             lanes[c.lane[i]]++;
         }
         const double n = (double)std::max<size_t>(1, c.time.size());
+        int longNotes = 0;
+        double widest = 0.0;
+        for (size_t i = 0; i < c.time.size(); i++) {
+            longNotes += i < c.hold.size() && c.hold[i] > 0.0f;
+            if (i > 0) widest = std::max(widest, c.time[i] - c.time[i - 1]);
+        }
+        printf("%-8s %d long notes, widest gap %.1f s; long notes at", "", longNotes, widest);
+        for (size_t i = 0; i < c.time.size() && i < c.hold.size(); i++)
+            if (c.hold[i] > 0.0f) printf(" %.1f", c.time[i]);
+        printf(" s\n");
         printf("%-8s %4d notes (%.2f/s)  lanes %d/%d/%d/%d  grid error mean %+.1f ms, mean abs %.1f ms, worst %.1f ms\n",
                kDiffName[d], (int)c.time.size(), c.time.size() / song.duration,
                lanes[0], lanes[1], lanes[2], lanes[3], sum / n * 1000.0, sumAbs / n * 1000.0, worst * 1000.0);
@@ -5417,7 +5501,7 @@ int main(int argc, char** argv)
                 for (int i = 0; i < 3; i++) fprintf(gLog, "  [%s: %s, %d fish]", GoalText(gGoals[i]), (gDaily.done >> i) & 1 ? "done" : "open", gGoals[i].fish);
                 fprintf(gLog, "  this walk finished %d goal(s) for %d fish; bonus paid: %s", gEarn.goals, gEarn.goalFish, gDaily.done & 8 ? "yes" : "no");
                 if (gTutorial) fprintf(gLog, "\nlesson: parts repeated %d %d %d %d %d times; first-time thank-you %d fish; finished flag %d", gTutorialTries[0], gTutorialTries[1],
-                                       gTutorialTries[2], gTutorialTries[3], gTutorialTries[4], gEarn.lessonFish, gProgress.guided);
+                                       gTutorialTries[2], gTutorialTries[3], gTutorialTries[4] + gTutorialTries[5], gEarn.lessonFish, gProgress.guided);
                 fprintf(gLog, "\nprogress now: %d song(s), %d purrfect, best streak %d, best rank %d, places mask %d\n", gProgress.songs, gProgress.perfects,
                         gProgress.bestStreak, gProgress.bestRank, gProgress.places);
                 if (const SongEntry* e = FindSong(gSongPath)) fprintf(gLog, "library: \"%s\" best on difficulty %d: %.4f, score %d\n", e->name.c_str(), gCfg.diff, e->best[gCfg.diff], e->score[gCfg.diff]);

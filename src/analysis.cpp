@@ -137,6 +137,91 @@ void BuildChart(const std::vector<Candidate>& cands, double frameSec, double tim
     }
 }
 
+// Gives a chart some shape after the fact.
+//
+// Long notes: about once every several seconds, the note with the most
+// sustained sound after it becomes one to hold, and the notes it would
+// overlap are dropped.
+//
+// Breathers: a stretch of three quarters of a minute that never lets up gets
+// a gap opened at its quietest moment.
+void ShapeChart(const SongAnalysis& song, int diff, Chart& c)
+{
+    static const double kLength[DIFF_COUNT] = { 1.4, 1.2, 1.0 };   // how long a long note lasts
+    static const double kEvery[DIFF_COUNT]  = { 9.0, 8.0, 7.0 };   // about one per this many seconds
+    const size_t n = c.time.size();
+    c.hold.assign(n, 0.0f);
+    if (n < 8 || song.low.empty()) return;
+
+    auto level = [&](double t) {
+        const double f = (t - song.envOffset) / song.hop;
+        const size_t i = (size_t)std::min(std::max(f, 0.0), (double)song.low.size() - 1.0);
+        return song.low[i] + song.mid[i] + song.high[i];
+    };
+    std::vector<uint8_t> drop(n, 0);
+    const double len = kLength[diff];
+
+    for (double from = 4.0; from + kEvery[diff] < song.duration - 3.0; from += kEvery[diff]) {
+        int best = -1;
+        float bestScore = 0.0f;
+        for (size_t i = 0; i < n; i++) {
+            const double t = c.time[i];
+            if (t < from) continue;
+            if (t >= from + kEvery[diff]) break;
+            if (drop[i] || (i > 0 && c.time[i - 1] == t) || (i + 1 < n && c.time[i + 1] == t)) continue;   // not a chord
+            if (t + len + 0.5 > song.duration) continue;
+            const float start = level(t + 0.06);
+            if (start < 0.5f) continue;
+            float least = start;
+            for (double u = t + 0.15; u <= t + len; u += 0.05) least = std::min(least, level(u));
+            if (least < 0.55f * start) continue;   // the sound dies away: nothing to hold on to
+            int lost = 0;
+            for (size_t j = i + 1; j < n && c.time[j] < t + len + 0.3; j++) lost++;
+            const float score = least / start + 0.2f * start - 0.06f * (float)lost;
+            if (best < 0 || score > bestScore) { best = (int)i; bestScore = score; }
+        }
+        if (best < 0) continue;
+        c.hold[best] = (float)len;
+        for (size_t j = (size_t)best + 1; j < n && c.time[j] < c.time[best] + len + 0.3; j++) drop[j] = 1;
+    }
+
+    // Breathers.
+    {
+        double stretch = c.time[0], lastEnd = c.time[0];
+        for (size_t i = 0; i < n; i++) {
+            if (drop[i]) continue;
+            if (c.time[i] - lastEnd >= 2.0) stretch = c.time[i];
+            lastEnd = c.time[i] + c.hold[i];
+            if (c.time[i] - stretch < 45.0) continue;
+            // The quietest 2.6 s that starts on a note, away from both ends of the stretch.
+            int at = -1;
+            float quietest = 1e9f;
+            for (size_t k = 0; k < n; k++) {
+                const double w = c.time[k];
+                if (drop[k] || w < stretch + 8.0 || w > c.time[i] - 6.0) continue;
+                bool longNote = c.hold[k] > 0.0f;
+                for (size_t j = k + 1; j < n && c.time[j] < w + 2.6; j++) longNote = longNote || c.hold[j] > 0.0f;
+                if (longNote) continue;
+                float sum = 0.0f;
+                for (double u = w + 0.3; u < w + 2.6; u += 0.1) sum += level(u);
+                if (sum < quietest) { quietest = sum; at = (int)k; }
+            }
+            if (at < 0) { stretch = c.time[i]; continue; }
+            for (size_t j = (size_t)at + 1; j < n && c.time[j] < c.time[at] + 2.6; j++) drop[j] = 1;
+            stretch = c.time[at] + 2.6;
+        }
+    }
+
+    Chart kept;
+    for (size_t i = 0; i < n; i++) {
+        if (drop[i]) continue;
+        kept.time.push_back(c.time[i]);
+        kept.lane.push_back(c.lane[i]);
+        kept.hold.push_back(c.hold[i]);
+    }
+    c = kept;
+}
+
 } // namespace
 
 bool AnalyzeSong(const int16_t* pcm, size_t frames, int channels, int sampleRate, SongAnalysis& out)
@@ -287,6 +372,7 @@ bool AnalyzeSong(const int16_t* pcm, size_t frames, int channels, int sampleRate
         out.pulse.resize(nf);
         for (size_t i = 0; i < nf; i++) out.pulse[i] = std::min(1.0f, flux[0][i] / ref);
     }
+    for (int d = 0; d < DIFF_COUNT; d++) ShapeChart(out, d, out.charts[d]);
     return true;
 }
 
