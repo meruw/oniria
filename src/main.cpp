@@ -56,7 +56,7 @@ static const int kLaneAction[DIFF_COUNT][4] = {
 static const int   kActionCount[DIFF_COUNT] = { 2, 3, 4 };
 static const char* kDiffName[DIFF_COUNT] = { "Cozy", "Playful", "Zoomies" };
 
-enum State { ST_MENU, ST_LOADING, ST_READY, ST_PLAYING, ST_PAUSED, ST_COUNTDOWN, ST_RESULTS, ST_WARDROBE, ST_SETTINGS };
+enum State { ST_MENU, ST_LOADING, ST_READY, ST_PLAYING, ST_PAUSED, ST_COUNTDOWN, ST_RESULTS, ST_WARDROBE, ST_SETTINGS, ST_CALIBRATE, ST_HOME };
 enum Judgement { J_PERFECT, J_GREAT, J_GOOD, J_MISS };
 
 // ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ static void StampLocked(int64_t pos)
 // the same low latency. The game thread queues commands; the voices belong to
 // the audio thread.
 struct SfxCommand { int sound; float rate, gain; };
-struct SfxVoice { const float* data = nullptr; int length = 0; double pos = 0.0, step = 1.0; float gain = 0.0f; };
+struct SfxVoice { const float* data = nullptr; int length = 0; double pos = 0.0, step = 1.0; float gain = 0.0f; int wait = 0; };
 static std::vector<float> gSfxData[SFX_COUNT];
 static SfxCommand gSfxQueue[64];
 static std::atomic<unsigned> gSfxWrite{ 0 }, gSfxRead{ 0 };
@@ -255,29 +255,60 @@ static SfxVoice gSfxVoices[16];
 // Counters for the end-to-end test: is the audio thread really running, and is it sending the song?
 static std::atomic<uint64_t> gAudioCallbacks{ 0 }, gAudioFrames{ 0 }, gAudioSongFrames{ 0 }, gAudioLoudFrames{ 0 }, gSfxStarted{ 0 }, gAudioLimited{ 0 };
 
+// The metronome for the latency calibration. The audio thread starts each tick
+// itself, at an exact sample, and notes when that sample went out, so the
+// ticks do not inherit the jitter of the game's frames.
+static const double kMetroPeriod = 0.6;
+static std::atomic<bool>   gMetroOn{ false };
+static std::atomic<int>    gMetroCount{ 0 };
+static std::atomic<double> gMetroTime[64];
+static int64_t gMetroFrame = 0;   // audio thread only
+
+// `wait` delays the start by that many frames into the buffer being mixed.
+static void StartVoice(int sound, float rate, float gain, int wait)
+{
+    SfxVoice* v = &gSfxVoices[0];
+    for (SfxVoice& cand : gSfxVoices) {
+        if (!cand.data) { v = &cand; break; }
+        if (cand.pos > v->pos) v = &cand;   // all busy: reuse the one that is furthest along
+    }
+    v->data = gSfxData[sound].data();
+    v->length = (int)gSfxData[sound].size();
+    v->pos = 0.0;
+    v->step = (double)rate * kSfxRate / gPlayer.sampleRate;
+    v->gain = gain;
+    v->wait = wait;
+}
+
 static void MixSfx(float* out, unsigned int frames)
 {
     unsigned r = gSfxRead.load(std::memory_order_relaxed);
     const unsigned w = gSfxWrite.load(std::memory_order_acquire);
     for (; r != w; r++) {
         const SfxCommand c = gSfxQueue[r & 63];
-        SfxVoice* v = &gSfxVoices[0];
-        for (SfxVoice& cand : gSfxVoices) {
-            if (!cand.data) { v = &cand; break; }
-            if (cand.pos > v->pos) v = &cand;   // all busy: reuse the one that is furthest along
-        }
-        v->data = gSfxData[c.sound].data();
-        v->length = (int)gSfxData[c.sound].size();
-        v->pos = 0.0;
-        v->step = (double)c.rate * kSfxRate / gPlayer.sampleRate;
-        v->gain = c.gain;
+        StartVoice(c.sound, c.rate, c.gain, 0);
         gSfxStarted.fetch_add(1, std::memory_order_relaxed);
     }
     gSfxRead.store(r, std::memory_order_release);
 
+    if (gMetroOn.load(std::memory_order_relaxed) && !gSfxData[SFX_CLICK].empty()) {
+        const int64_t period = (int64_t)(kMetroPeriod * gPlayer.sampleRate);
+        const double now = NowSeconds();
+        for (unsigned int i = 0; i < frames; i++) {
+            if (gMetroFrame++ % period != 0) continue;
+            StartVoice(SFX_CLICK, 1.6f, 0.5f, (int)i);
+            const int n = gMetroCount.load(std::memory_order_relaxed);
+            gMetroTime[n & 63].store(now + (double)i / gPlayer.sampleRate);
+            gMetroCount.store(n + 1, std::memory_order_release);
+        }
+    } else {
+        gMetroFrame = 0;
+    }
+
     for (SfxVoice& v : gSfxVoices) {
         if (!v.data) continue;
         for (unsigned int i = 0; i < frames; i++) {
+            if (v.wait > 0) { v.wait--; continue; }
             const int k = (int)v.pos;
             if (k + 1 >= v.length) { v.data = nullptr; break; }
             const float frac = (float)(v.pos - k);
@@ -4059,6 +4090,124 @@ static void DrawWardrobe()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Audio calibration
+// ---------------------------------------------------------------------------
+// Sound takes a while to leave the computer, and how long depends on the
+// device: a few milliseconds for wired headphones, a tenth of a second or more
+// for Bluetooth. The player taps along to a tick by ear; how late the taps are
+// compared with when each tick left the audio thread is the offset to use.
+
+struct Calibration {
+    int phase = 0;              // 0 explaining, 1 ticking and listening for taps, 2 result
+    std::vector<float> late;    // for each accepted tap, seconds after the tick it belongs to
+    float median = 0.0f, spread = 0.0f, pulse = 0.0f;
+    int suggest = 0;
+    bool enough = false;
+};
+static Calibration gCal;
+static const int kCalSkip = 2, kCalTaps = 16;   // ticks to find the beat with, and taps to collect
+
+static void CalTap(double when)
+{
+    const int count = gMetroCount.load();
+    if (count <= kCalSkip) return;
+    // Measured against the latest tick; a tap nearer the next or the previous one is counted for that one.
+    double late = when - (gMetroTime[(count - 1) & 63].load() + kBaseLatency);
+    if (late > kMetroPeriod / 2) late -= kMetroPeriod;
+    if (late < -kMetroPeriod / 2) late += kMetroPeriod;
+    if (std::fabs(late) > 0.28) return;
+    gCal.late.push_back((float)late);
+    gCal.pulse = 1.0f;
+}
+
+static void FinishCalibration()
+{
+    gMetroOn.store(false);
+    std::vector<float> v = gCal.late;
+    gCal.enough = v.size() >= 8;
+    if (gCal.enough) {
+        std::sort(v.begin(), v.end());
+        gCal.median = v[v.size() / 2];
+        for (float& x : v) x = std::fabs(x - gCal.median);
+        std::sort(v.begin(), v.end());
+        gCal.spread = v[v.size() / 2];   // median distance from the median: how steady the taps were
+        gCal.suggest = std::clamp((int)lroundf(gCal.median * 1000.0f / 5.0f) * 5, -300, 300);
+    }
+    gCal.phase = 2;
+}
+
+static void StartCalibration()
+{
+    gCal = Calibration();
+    gCal.phase = 1;
+    gMetroCount.store(0);
+    gMetroOn.store(true);
+}
+
+static void UpdateCalibration(float dt)
+{
+    gCal.pulse = std::max(0.0f, gCal.pulse - dt * 5.0f);
+    LaneKeyEvent events[32];
+    const int n = PlatformPollKeys(events, 32);
+    if (n > 0) gRawKeys = true;
+    if (gCal.phase != 1) return;
+    for (int i = 0; i < n; i++)
+        if (events[i].down) CalTap(events[i].time);
+    if (!gRawKeys)
+        for (int a = 0; a < 4; a++)
+            if (IsKeyPressed(kKeyA[a]) || IsKeyPressed(kKeyB[a])) CalTap(NowSeconds());
+    if ((int)gCal.late.size() >= kCalTaps || gMetroCount.load() > kCalSkip + kCalTaps + 6) FinishCalibration();
+}
+
+static void DrawCalibration()
+{
+    int left, top;
+    const int pw = 330, ph = 192;
+    Panel(pw, ph, left, top);
+    const int cx = left + pw / 2;
+    Gear2((float)left + 20, (float)top + 20, kCoral);
+    Text("Audio calibration", left + 34, top + 9, 20, kCocoa, 0, false);
+    auto leave = [&]() { gMetroOn.store(false); gCal = Calibration(); gState = ST_SETTINGS; };
+
+    if (gCal.phase == 0) {
+        Text("You will hear a steady tick.", cx, top + 46, 10, kCocoa, 1, false);
+        Text("Tap D, F, J or K on every tick, by ear,", cx, top + 62, 10, kCocoa, 1, false);
+        Text("the way you would while playing.", cx, top + 75, 10, kCocoa, 1, false);
+        Text("Headphones and speakers each need their own setting.", cx, top + 96, 10, kCocoaSoft, 1, false);
+        if (Button(cx - 70, top + 122, 140, 24, "Start", 1) || Key(KEY_ENTER) || Key(KEY_SPACE)) StartCalibration();
+        else if (Button(cx - 70, top + 156, 140, 18, "Back") || Key(KEY_ESCAPE)) leave();
+    } else if (gCal.phase == 1) {
+        const int taps = (int)gCal.late.size();
+        Text(gMetroCount.load() <= kCalSkip ? "Listen..." : "Tap along", cx, top + 44, 20, kCocoa, 1, false);
+        Paw2((float)cx, (float)top + 92, 9.0f + 3.0f * gCal.pulse, gCal.pulse > 0.05f ? kCoralHot : kCoral);   // answers the taps, not the ticks
+        for (int i = 0; i < kCalTaps; i++)
+            Card(cx - kCalTaps * 5 + i * 10, top + 118, 8, 8, i < taps ? kCoral : kPaperDeep, i < taps ? kCoralLine : kLine, false);
+        Text("D   F   J   K", cx, top + 134, 10, kCocoaSoft, 1, false);
+        if (Button(cx - 70, top + 156, 140, 18, "Cancel") || Key(KEY_ESCAPE)) leave();
+    } else if (!gCal.enough) {
+        Text("That was not enough taps to tell.", cx, top + 56, 10, kCocoa, 1, false);
+        Text("Try to tap on every tick, sixteen times.", cx, top + 72, 10, kCocoaSoft, 1, false);
+        if (Button(cx - 70, top + 110, 140, 24, "Try again", 1) || Key(KEY_ENTER)) StartCalibration();
+        else if (Button(cx - 70, top + 146, 140, 18, "Back") || Key(KEY_ESCAPE)) leave();
+    } else {
+        const int ms = (int)lroundf(gCal.median * 1000.0f);
+        Text(TextFormat(ms >= 0 ? "Your taps landed %d ms after the tick." : "Your taps landed %d ms before the tick.", std::abs(ms)), cx, top + 46, 10, kCocoa, 1, false);
+        Text(TextFormat("Suggested audio offset:  %+d ms", gCal.suggest), cx, top + 64, 10, kCocoa, 1, false);
+        Text(TextFormat("it is %+d ms now", gCfg.offsetMs), cx, top + 77, 10, kCocoaSoft, 1, false);
+        Text(gCal.spread > 0.035f ? "Your taps were a little uneven; another try may help." : "Nice and steady.", cx, top + 96, 10, kCocoaSoft, 1, false);
+        if (Button(cx - 70, top + 118, 140, 24, "Use it", 1) || Key(KEY_ENTER)) {
+            gCfg.offsetMs = gCal.suggest;
+            SaveSettings();
+            leave();
+        } else if (Button(cx - 70, top + 152, 68, 18, "Try again")) {
+            StartCalibration();
+        } else if (Button(cx + 2, top + 152, 68, 18, "Back") || Key(KEY_ESCAPE)) {
+            leave();
+        }
+    }
+}
+
 // Settings: four tabs down the left, one setting per row with a short note under it.
 static void DrawSettings()
 {
@@ -4106,6 +4255,9 @@ static void DrawSettings()
             row("Audio offset", "raise it if things arrive before the beat");
             stepper(TextFormat("%+d ms", gCfg.offsetMs), delta);
             gCfg.offsetMs = std::clamp(gCfg.offsetMs + delta * 5, -300, 300);
+            next();
+            row("Calibrate by ear", "tap along to a tick and the game sets it");
+            if (Button(right - 90, y, 90, 18, "Calibrate") || Key(KEY_C)) { gCal = Calibration(); gState = ST_CALIBRATE; }
             break;
         }
         case 1: {
@@ -4190,6 +4342,8 @@ static void DrawFrame(double t)
         case ST_RESULTS:  DrawResults(); break;
         case ST_WARDROBE: DrawWardrobe(); break;
         case ST_SETTINGS: DrawSettings(); break;
+        case ST_CALIBRATE: DrawCalibration(); break;
+        default: break;
     }
 }
 
@@ -4207,6 +4361,41 @@ static std::atomic<int>  gRobotPauseSeen{ 0 };   // 1 if the game was paused whe
 static std::atomic<bool> gRobotFinished{ false };
 // What the robot saw when it went shopping after the song.
 static struct { bool inWardrobe = false, backInMenu = false; int fishBefore = 0, fishAfter = 0, triedOn = -1, hat = -1; unsigned ownedBefore = 0, ownedAfter = 0; } gShop;
+
+// Taps along to the calibration's ticks a known amount late, and checks the game measures that amount.
+static void RobotCalibrate(void* window)
+{
+    auto tap = [&](int virtualKey) {
+        PlatformSendKey(window, virtualKey, true);
+        PlatformSleep(0.05);
+        PlatformSendKey(window, virtualKey, false);
+    };
+    const double meant = 0.045;
+    PlatformSleep(1.0);
+    for (int tries = 0; tries < 5 && !gRobotStop && gCal.phase == 0; tries++) {
+        PlatformFocusWindow(window);
+        tap(0x0D);   // Start
+        PlatformSleep(0.5);
+    }
+    int next = 0, sent = 0;
+    while (!gRobotStop && gCal.phase == 1) {
+        if (next >= gMetroCount.load()) { PlatformSleep(0.002); continue; }
+        const double due = gMetroTime[next & 63].load() + kBaseLatency + meant;
+        while (NowSeconds() < due - 0.003) PlatformSleep(0.001);
+        while (NowSeconds() < due) {}
+        if (PlatformSendLaneKey(window, next % 4, true)) sent++;
+        PlatformSleep(0.03);
+        PlatformSendLaneKey(window, next % 4, false);
+        next++;
+    }
+    PlatformSleep(0.3);
+    if (gLog) fprintf(gLog, "calibration: %d taps sent %.0f ms after each tick on purpose; the game counted %d, measured %+.1f ms (spread %.1f ms) and suggests %+d ms\n",
+                      sent, meant * 1000.0, (int)gCal.late.size(), gCal.median * 1000.0f, gCal.spread * 1000.0f, gCal.suggest);
+    tap(0x0D);   // Use it
+    PlatformSleep(0.5);
+    if (gLog) fprintf(gLog, "calibration: the offset setting is now %+d ms; back in settings: %s\n", gCfg.offsetMs, gState == ST_SETTINGS ? "yes" : "NO");
+    gRobotFinished = true;
+}
 
 static void RobotThread(void* window)
 {
@@ -4343,6 +4532,7 @@ int main(int argc, char** argv)
     double shotAt = 12.0;
     int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
     int shotFish = -1, shotXp = -1;
+    bool robotCalibrate = false;
     const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
@@ -4364,6 +4554,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--sel") && i + 1 < argc) gWardrobeSel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
+        else if (!strcmp(argv[i], "--calibrate")) robotCalibrate = true;
         else if (!strcmp(argv[i], "--seq") && i + 1 < argc) seqLeft = std::max(0, atoi(argv[++i]) - 1);
         else if (!strcmp(argv[i], "--seq-step") && i + 1 < argc) seqStep = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--sfx-dump") && i + 1 < argc) return WriteSfxFiles(argv[i + 1]) ? 0 : 1;
@@ -4444,6 +4635,12 @@ int main(int argc, char** argv)
         gCfg.watch = true;
         if (shotView == "wardrobe") gState = ST_WARDROBE;
         else if (shotView == "settings") gState = ST_SETTINGS;
+        else if (shotView == "calibrate") {   // --tab picks the phase
+            gState = ST_CALIBRATE;
+            gCal.phase = std::min(2, gSettingsTab);
+            if (gCal.phase == 1) { gCal.late.assign(7, 0.05f); gMetroCount.store(9); }
+            if (gCal.phase == 2) { gCal.enough = true; gCal.median = 0.062f; gCal.spread = 0.012f; gCal.suggest = 60; }
+        }
         else if (shotView != "menu") {
             BeginLoad(songPath, songPath.empty());
             FinishLoad();
@@ -4452,13 +4649,14 @@ int main(int argc, char** argv)
         }
     } else if (robotLog) {
         if (gLog) fprintf(gLog, "window in front: %s\n", PlatformFocusWindow(GetWindowHandle()) ? "yes" : "NO");
-        if (songPath.empty()) BeginLoad("", true);
+        if (robotCalibrate) gState = ST_CALIBRATE;
+        else if (songPath.empty()) BeginLoad("", true);
         else BeginLoad(songPath, false);
     } else if (!songPath.empty()) {
         BeginLoad(songPath, false);
     }
     std::thread robot;
-    if (gLog) robot = std::thread(RobotThread, GetWindowHandle());
+    if (gLog) robot = std::thread(robotCalibrate ? RobotCalibrate : RobotThread, GetWindowHandle());
     const double robotStart = NowSeconds();
     double robotDone = 0.0, slowest = 0.0, frameSum = 0.0;
     int frameCount = 0, slowFrames = 0;
@@ -4521,13 +4719,18 @@ int main(int argc, char** argv)
                 gCountdown -= dt;
                 if (gCountdown <= 0.0f) { ResumePlayback(); gState = ST_PLAYING; }
                 break;
+            case ST_CALIBRATE:
+                UpdateCalibration(dt);
+                break;
             default: break;
         }
         if (gState != ST_PLAYING) { LaneKeyEvent drop[32]; while (PlatformPollKeys(drop, 32) == 32) {} }
 
         UpdateScene(dt, t);
 
-        if (gLog) {   // end-to-end test: report once the walk is over, or give up
+        if (gLog && robotCalibrate) {
+            if (gRobotFinished || NowSeconds() - robotStart > 60.0) quit = true;
+        } else if (gLog) {   // end-to-end test: report once the walk is over, or give up
             const bool timedOut = NowSeconds() - robotStart > 120.0;
             if ((gState == ST_RESULTS || timedOut) && robotDone == 0.0) {
                 robotDone = NowSeconds();
@@ -4587,7 +4790,7 @@ int main(int argc, char** argv)
             shotFrames++;
             if (shotHold < 0) {
                 const bool timed = shotView == "play" || shotView == "pause" || shotView == "results";
-                if (gState == ST_MENU || gState == ST_WARDROBE || gState == ST_SETTINGS || !timed ? shotFrames >= 180 : gSimTime >= shotAt) {
+                if (gState == ST_MENU || gState == ST_WARDROBE || gState == ST_SETTINGS || gState == ST_CALIBRATE || gState == ST_HOME || !timed ? shotFrames >= 180 : gSimTime >= shotAt) {
                     if (shotView == "pause") { gPausedAt = t; gState = ST_PAUSED; shotHold = 40; }
                     else if (shotView == "results") { FinishGame(); shotHold = 90; }
                     else shotHold = 0;
