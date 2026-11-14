@@ -1059,6 +1059,9 @@ const int kCatCount = (int)(sizeof(kCats) / sizeof(kCats[0]));
 // whatever it is wearing. Head, eyes, legs and tail segments are modelled
 // around their own joints so they can be posed. Proportions are deliberately
 // those of a kitten: a big head, big low-set eyes, a short body and stubby legs.
+// What the model is wearing: normally what is equipped, but the wardrobe also uses it to try things on.
+static int gWearHat = 0, gWearNeck = 1, gWearBack = 0;
+
 static void BuildCat(int kind)
 {
     const CatKind& c = kCats[std::clamp(kind, 0, kCatCount - 1)];
@@ -1202,7 +1205,7 @@ static void BuildCat(int kind)
     // A level ellipse `rz` wide and `rx` long at height y; `dx` slides it back or forward.
     auto level = [&](float y, float rz, float rx, float dx = 0.0f) { return LoftRing{ { hx + dx, y, 0 }, rz * hw, rx }; };
     static const Vector3 kPetals[4] = { { 1.0f, 0.62f, 0.72f }, { 1.0f, 0.88f, 0.45f }, { 1.0f, 1.0f, 1.0f }, { 0.78f, 0.72f, 1.0f } };
-    switch (gCfg.hat) {
+    switch (gWearHat) {
         case 1: {   // bow, sitting on the slope of the head beside the near ear
             const Vector3 ribbon = Rgb(242, 112, 142);
             AddBlob(sCatHat, Vector3Add(onHead(0.26f, 1.2f, 0.035f), Vector3{ 0.02f, 0, 0 }), { 0.05f, 0.085f, 0.095f }, ribbon);
@@ -1314,7 +1317,7 @@ static void BuildCat(int kind)
     };
     const Vector3 chin = onCollar(-kPi / 2, 0.0f);
     LoftRing ring[2];
-    switch (gCfg.neck) {
+    switch (gWearNeck) {
         case 1:     // bell collar, in the cat's own colour
             band(0.03f, 0.0f, ring);
             AddLoft(sCatNeck, ring, 2, 10, Z, lean, [&](int, int, float) -> Vector3 { return c.collar; });
@@ -1357,7 +1360,7 @@ static void BuildCat(int kind)
 
     // ---- On the back (cat space). The top of the back is around y = 0.69, and
     // the head hides everything forward of x = 0.05, so these sit well back. ----
-    switch (gCfg.back) {
+    switch (gWearBack) {
         case 1: {   // backpack: a soft bag sitting on the back, a flap over the top, a pocket and a button on each side
             const Vector3 canvas = Rgb(96, 176, 186), trim = Rgb(70, 140, 156), flap = Rgb(130, 204, 208), button = Rgb(250, 222, 130);
             const float bx = -0.21f;
@@ -1502,63 +1505,83 @@ static void GroundColours(float x, Vector3& grass, Vector3& path)
 }
 
 // ---------------------------------------------------------------------------
-// Progress and things to unlock
+// Progress, fish and levels
 // ---------------------------------------------------------------------------
-// Playing unlocks cats and things for them to wear. Nothing is bought: every
-// item has one plain condition, checked against a handful of lifetime numbers,
-// so only those numbers are saved.
+// Every finished walk pays fish and experience. Fish buy things in the
+// wardrobe. Experience raises the player's level; each level pays a few more
+// fish, and some cats and items are rewards for reaching a level and cannot be
+// bought. Only the fish, the experience, a bit per item bought and a handful
+// of lifetime numbers are saved.
 
 struct Progress {
     int songs = 0, perfects = 0, bestStreak = 0, bestRank = 9, fullCombos = 0;
     int places = 0;          // bit per place walked through
     float minutes = 0.0f;
+    int fish = 0, xp = 0;
+    unsigned owned = 0;      // bit per item bought
     unsigned known = 0;      // bit per item already seen unlocked in the wardrobe
 };
 static Progress gProgress;
 static bool gUnlockAll = false;   // screenshot option
 
 enum Slot { SLOT_CAT, SLOT_HAT, SLOT_NECK, SLOT_BACK, SLOT_COUNT };
-enum Need { NEED_NONE, NEED_SONGS, NEED_PERFECTS, NEED_STREAK, NEED_RANK, NEED_PLACE, NEED_MINUTES, NEED_FULLCOMBO };
+enum How { HOW_FREE, HOW_BUY, HOW_LEVEL };   // owned from the start, bought with fish, or the reward for reaching a level
 
-struct Item { int slot; const char* name; int need, amount; };
+struct Item { int slot; const char* name; int how, amount; };   // amount: the price in fish, or the level
 
 // Within a slot, the order here is the value stored in the settings. Cats match kCats.
 static const Item kItems[] = {
-    { SLOT_CAT, "Mango", NEED_NONE, 0 },
-    { SLOT_CAT, "Domino", NEED_NONE, 0 },
-    { SLOT_CAT, "Mochi", NEED_NONE, 0 },
-    { SLOT_CAT, "Luna", NEED_SONGS, 3 },
-    { SLOT_CAT, "Pebble", NEED_PERFECTS, 300 },
-    { SLOT_CAT, "Cloud", NEED_STREAK, 60 },
-    { SLOT_CAT, "Midnight", NEED_SONGS, 6 },
+    { SLOT_CAT, "Mango", HOW_FREE, 0 },
+    { SLOT_CAT, "Domino", HOW_FREE, 0 },
+    { SLOT_CAT, "Mochi", HOW_FREE, 0 },
+    { SLOT_CAT, "Luna", HOW_LEVEL, 3 },
+    { SLOT_CAT, "Pebble", HOW_LEVEL, 6 },
+    { SLOT_CAT, "Cloud", HOW_LEVEL, 10 },
+    { SLOT_CAT, "Midnight", HOW_LEVEL, 15 },
 
-    { SLOT_HAT, "No hat", NEED_NONE, 0 },
-    { SLOT_HAT, "Bow", NEED_NONE, 0 },
-    { SLOT_HAT, "Flower crown", NEED_PERFECTS, 50 },
-    { SLOT_HAT, "Party hat", NEED_STREAK, 25 },
-    { SLOT_HAT, "Straw hat", NEED_PLACE, BIOME_SEASIDE },
-    { SLOT_HAT, "Beanie", NEED_PLACE, BIOME_SNOW },
-    { SLOT_HAT, "Witch hat", NEED_PLACE, BIOME_AUTUMN },
-    { SLOT_HAT, "Top hat", NEED_RANK, 1 },
-    { SLOT_HAT, "Crown", NEED_RANK, 0 },
-    { SLOT_HAT, "Headphones", NEED_SONGS, 10 },
-    { SLOT_HAT, "Halo", NEED_FULLCOMBO, 1 },
+    { SLOT_HAT, "No hat", HOW_FREE, 0 },
+    { SLOT_HAT, "Bow", HOW_FREE, 0 },
+    { SLOT_HAT, "Flower crown", HOW_BUY, 80 },
+    { SLOT_HAT, "Party hat", HOW_LEVEL, 5 },
+    { SLOT_HAT, "Straw hat", HOW_BUY, 150 },
+    { SLOT_HAT, "Beanie", HOW_BUY, 150 },
+    { SLOT_HAT, "Witch hat", HOW_BUY, 250 },
+    { SLOT_HAT, "Top hat", HOW_BUY, 400 },
+    { SLOT_HAT, "Crown", HOW_LEVEL, 18 },
+    { SLOT_HAT, "Headphones", HOW_LEVEL, 8 },
+    { SLOT_HAT, "Halo", HOW_LEVEL, 20 },
 
-    { SLOT_NECK, "Nothing", NEED_NONE, 0 },
-    { SLOT_NECK, "Bell collar", NEED_NONE, 0 },
-    { SLOT_NECK, "Bow tie", NEED_SONGS, 1 },
-    { SLOT_NECK, "Scarf", NEED_PERFECTS, 150 },
-    { SLOT_NECK, "Bandana", NEED_STREAK, 40 },
-    { SLOT_NECK, "Flower garland", NEED_PLACE, BIOME_BLOSSOM },
+    { SLOT_NECK, "Nothing", HOW_FREE, 0 },
+    { SLOT_NECK, "Bell collar", HOW_FREE, 0 },
+    { SLOT_NECK, "Bow tie", HOW_LEVEL, 2 },
+    { SLOT_NECK, "Scarf", HOW_BUY, 100 },
+    { SLOT_NECK, "Bandana", HOW_BUY, 120 },
+    { SLOT_NECK, "Flower garland", HOW_BUY, 200 },
 
-    { SLOT_BACK, "Nothing", NEED_NONE, 0 },
-    { SLOT_BACK, "Backpack", NEED_MINUTES, 10 },
-    { SLOT_BACK, "Balloon", NEED_SONGS, 5 },
-    { SLOT_BACK, "Wings", NEED_STREAK, 100 },
+    { SLOT_BACK, "Nothing", HOW_FREE, 0 },
+    { SLOT_BACK, "Backpack", HOW_BUY, 200 },
+    { SLOT_BACK, "Balloon", HOW_BUY, 300 },
+    { SLOT_BACK, "Wings", HOW_LEVEL, 12 },
 };
 const int kItemCount = (int)(sizeof(kItems) / sizeof(kItems[0]));
 
 static int RankOf(float accuracy) { return accuracy >= 0.95f ? 0 : accuracy >= 0.88f ? 1 : accuracy >= 0.78f ? 2 : accuracy >= 0.65f ? 3 : 4; }
+
+// Experience needed to go from `level` to the next one. Each level asks a little more.
+static int XpForLevel(int level) { return 150 + 75 * (level - 1); }
+
+// The level a lifetime amount of experience comes to. `into` and `span` describe the bar towards the next one.
+static int LevelOf(int xp, int* into = nullptr, int* span = nullptr)
+{
+    int level = 1;
+    while (xp >= XpForLevel(level)) { xp -= XpForLevel(level); level++; }
+    if (into) *into = xp;
+    if (span) *span = XpForLevel(level);
+    return level;
+}
+
+// Fish paid for reaching `level`.
+static int LevelFish(int level) { return 20 + 5 * level; }
 
 static int SlotSize(int slot)
 {
@@ -1575,42 +1598,30 @@ static int ItemIndex(int slot, int n)
     return 0;
 }
 
-static bool Unlocked(const Item& it)
+static bool Unlocked(int index)
 {
     if (gUnlockAll) return true;
-    const Progress& g = gProgress;
-    switch (it.need) {
-        case NEED_SONGS:     return g.songs >= it.amount;
-        case NEED_PERFECTS:  return g.perfects >= it.amount;
-        case NEED_STREAK:    return g.bestStreak >= it.amount;
-        case NEED_RANK:      return g.bestRank <= it.amount;
-        case NEED_PLACE:     return (g.places >> it.amount) & 1;
-        case NEED_MINUTES:   return g.minutes >= (float)it.amount;
-        case NEED_FULLCOMBO: return g.fullCombos >= it.amount;
-        default:             return true;
+    const Item& it = kItems[index];
+    switch (it.how) {
+        case HOW_BUY:   return (gProgress.owned >> index) & 1;
+        case HOW_LEVEL: return LevelOf(gProgress.xp) >= it.amount;
+        default:        return true;
     }
 }
 
-// What it takes, with how far along the player is.
-static const char* Requirement(const Item& it)
+// The reward waiting at the lowest level above `level`, or -1 when every one has been earned.
+static int NextLevelReward(int level)
 {
-    const Progress& g = gProgress;
-    switch (it.need) {
-        case NEED_SONGS:     return TextFormat(it.amount == 1 ? "finish a song" : "finish %d songs  %d/%d", it.amount, std::min(g.songs, it.amount), it.amount);
-        case NEED_PERFECTS:  return TextFormat("%d purrfect hits  %d/%d", it.amount, std::min(g.perfects, it.amount), it.amount);
-        case NEED_STREAK:    return TextFormat("streak of %d  best %d", it.amount, g.bestStreak);
-        case NEED_RANK:      return it.amount == 0 ? "earn an S rank" : "earn an A rank";
-        case NEED_PLACE:     return TextFormat("visit the %s", kBiomeName[it.amount]);
-        case NEED_MINUTES:   return TextFormat("walk %d minutes  %d/%d", it.amount, std::min((int)g.minutes, it.amount), it.amount);
-        case NEED_FULLCOMBO: return "a song with no misses";
-        default:             return "";
-    }
+    int best = -1;
+    for (int i = 0; i < kItemCount; i++)
+        if (kItems[i].how == HOW_LEVEL && kItems[i].amount > level && (best < 0 || kItems[i].amount < kItems[best].amount)) best = i;
+    return best;
 }
 
 static int UnlockedCount()
 {
     int n = 0;
-    for (const Item& it : kItems) n += Unlocked(it);
+    for (int i = 0; i < kItemCount; i++) n += Unlocked(i);
     return n;
 }
 
@@ -1630,6 +1641,9 @@ static void LoadProgress()
         else if (!strcmp(key, "full")) gProgress.fullCombos = (int)v;
         else if (!strcmp(key, "places")) gProgress.places = (int)v;
         else if (!strcmp(key, "minutes")) gProgress.minutes = (float)v;
+        else if (!strcmp(key, "fish")) gProgress.fish = std::max(0, (int)v);
+        else if (!strcmp(key, "xp")) gProgress.xp = std::max(0, (int)v);
+        else if (!strcmp(key, "owned")) gProgress.owned = (unsigned)v;
         else if (!strcmp(key, "known")) gProgress.known = (unsigned)v;
     }
     fclose(f);
@@ -1640,11 +1654,32 @@ static void SaveProgress()
     if (gSim) return;
     FILE* f = fopen(ProgressPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nknown=%u\n",
+    fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nfish=%d\nxp=%d\nowned=%u\nknown=%u\n",
             gProgress.songs, gProgress.perfects, gProgress.bestStreak, gProgress.bestRank, gProgress.fullCombos,
-            gProgress.places, gProgress.minutes, gProgress.known);
+            gProgress.places, gProgress.minutes, gProgress.fish, gProgress.xp, gProgress.owned, gProgress.known);
     fclose(f);
 }
+
+// Pays for an item if there are fish enough.
+static bool Buy(int index)
+{
+    const Item& it = kItems[index];
+    if (it.how != HOW_BUY || Unlocked(index) || gProgress.fish < it.amount) return false;
+    gProgress.fish -= it.amount;
+    gProgress.owned |= 1u << index;
+    gProgress.known |= 1u << index;
+    SaveProgress();
+    return true;
+}
+
+// What the walk that just ended paid.
+struct Earnings {
+    bool counted = false;                    // false in watch mode
+    int fish = 0, xp = 0, levelFish = 0;     // levelFish: paid on top for the levels reached
+    int xpBefore = 0, levelBefore = 1, levelAfter = 1;
+    float at = 0.0f;                         // when the results appeared, for the counting-up
+};
+static Earnings gEarn;
 
 static std::vector<int> gNewUnlocks;   // items earned by the song that just ended
 static bool gSimCounts = false;        // screenshot option: let a simulated run earn progress
@@ -1655,8 +1690,17 @@ static void CheckEquipped()
     int* field[SLOT_COUNT] = { &gCfg.cat, &gCfg.hat, &gCfg.neck, &gCfg.back };
     static const int kDefault[SLOT_COUNT] = { 0, 0, 1, 0 };
     for (int slot = 0; slot < SLOT_COUNT; slot++)
-        if (*field[slot] < 0 || *field[slot] >= SlotSize(slot) || !Unlocked(kItems[ItemIndex(slot, *field[slot])])) *field[slot] = kDefault[slot];
+        if (*field[slot] < 0 || *field[slot] >= SlotSize(slot) || !Unlocked(ItemIndex(slot, *field[slot]))) *field[slot] = kDefault[slot];
 }
+
+// Rebuilds the model as a given cat wearing given things.
+static int gShown[SLOT_COUNT] = { -1, -1, -1, -1 };
+static void ShowCat(int cat, int hat, int neck, int back)
+{
+    gShown[SLOT_CAT] = cat; gShown[SLOT_HAT] = gWearHat = hat; gShown[SLOT_NECK] = gWearNeck = neck; gShown[SLOT_BACK] = gWearBack = back;
+    BuildCat(cat);
+}
+static void ShowEquipped() { ShowCat(gCfg.cat, gCfg.hat, gCfg.neck, gCfg.back); }
 
 // Height of the path at world x. During a song the hills are the song's
 // loudness: quiet passages are valleys, loud ones are hilltops.
@@ -2114,21 +2158,10 @@ static void FinishGame()
     gEndJoy = std::clamp((Accuracy() - 0.6f) / 0.35f, 0.0f, 1.0f) * 0.85f;
     gNewBest = false;
     gNewUnlocks.clear();
-    if ((!gCfg.watch && !gSim) || gSimCounts) {
-        // Lifetime numbers, and whatever they have just unlocked.
-        std::vector<bool> before;
-        for (const Item& it : kItems) before.push_back(Unlocked(it));
-        const int notes = gCount[0] + gCount[1] + gCount[2] + gCount[3];
-        gProgress.songs++;
-        gProgress.perfects += gCount[J_PERFECT];
-        gProgress.bestStreak = std::max(gProgress.bestStreak, gMaxCombo);
-        gProgress.bestRank = std::min(gProgress.bestRank, RankOf(Accuracy()));
-        if (notes > 0 && gCount[J_MISS] == 0) gProgress.fullCombos++;
-        gProgress.minutes += (float)(gSong.duration / 60.0);
-        for (int i = 0; i < kItemCount; i++)
-            if (!before[i] && Unlocked(kItems[i])) gNewUnlocks.push_back(i);
-        SaveProgress();
-    }
+    gEarn = Earnings();
+    gEarn.at = gScene.time;
+    gEarn.xpBefore = gProgress.xp;
+    gEarn.levelBefore = gEarn.levelAfter = LevelOf(gProgress.xp);
     if (!gCfg.watch && !gSim) {
         if (SongEntry* e = FindSong(gSongPath)) {
             if (Accuracy() > e->best[gCfg.diff]) {
@@ -2138,6 +2171,37 @@ static void FinishGame()
                 SaveLibrary();
             }
         }
+    }
+    if ((!gCfg.watch && !gSim) || gSimCounts) {
+        std::vector<bool> before;
+        for (int i = 0; i < kItemCount; i++) before.push_back(Unlocked(i));
+        const int notes = gCount[0] + gCount[1] + gCount[2] + gCount[3];
+        const bool clean = notes > 0 && gCount[J_MISS] == 0;
+        const float minutes = (float)(gSong.duration / 60.0), acc = notes > 0 ? Accuracy() : 0.0f;
+
+        // Lifetime numbers.
+        gProgress.songs++;
+        gProgress.perfects += gCount[J_PERFECT];
+        gProgress.bestStreak = std::max(gProgress.bestStreak, gMaxCombo);
+        gProgress.bestRank = std::min(gProgress.bestRank, RankOf(acc));
+        if (clean) gProgress.fullCombos++;
+        gProgress.minutes += minutes;
+
+        // Pay. Both grow with the length of the song and how well it went, and a little with the difficulty,
+        // so any way of playing earns: a long relaxed walk pays about as much as a short demanding one.
+        static const float kDiffPay[DIFF_COUNT] = { 1.0f, 1.15f, 1.3f };
+        static const int kRankFish[5] = { 20, 12, 6, 3, 0 };
+        gEarn.counted = true;
+        gEarn.xp = 10 + (int)lroundf(minutes * 100.0f * acc * kDiffPay[gCfg.diff]);
+        gEarn.fish = 5 + (int)lroundf(minutes * 30.0f * acc * acc * kDiffPay[gCfg.diff]) + kRankFish[RankOf(acc)] + (clean ? 15 : 0) + (gNewBest ? 5 : 0);
+        gProgress.xp += gEarn.xp;
+        gEarn.levelAfter = LevelOf(gProgress.xp);
+        for (int level = gEarn.levelBefore + 1; level <= gEarn.levelAfter; level++) gEarn.levelFish += LevelFish(level);
+        gProgress.fish += gEarn.fish + gEarn.levelFish;
+
+        for (int i = 0; i < kItemCount; i++)
+            if (!before[i] && Unlocked(i)) gNewUnlocks.push_back(i);
+        SaveProgress();
     }
     for (Bloom& b : gBlooms) b.x = -1e9f;
     gState = ST_RESULTS;
@@ -2935,12 +2999,12 @@ static void DrawCat(float x, bool walking)
     const float lift2 = 0.3f;    // how far the cat's shading is pulled towards its true colours
     DrawShape(sCatBody, root, plain, lift2);
     DrawShape(sCatNeck, root, plain, lift2);
-    if (gCfg.back == 1) {
+    if (gWearBack == 1) {
         DrawShape(sCatBack, root, plain, lift2);
-    } else if (gCfg.back == 2) {   // the balloon trails behind and bobs
+    } else if (gWearBack == 2) {   // the balloon trails behind and bobs
         const Matrix tied = MatrixMultiply(MatrixRotateZ(0.25f + 0.1f * sinf(gScene.time * 1.7f) + 0.05f * gScene.beat), MatrixTranslate(-0.20f, 0.67f, 0));
         DrawShape(sCatBack, MatrixMultiply(tied, root), plain, 0.35f);
-    } else if (gCfg.back == 3) {   // wings flutter, faster when happy
+    } else if (gWearBack == 3) {   // wings flutter, faster when happy
         const float flap = 0.35f + 0.45f * sinf(gScene.time * (7.0f + 6.0f * joy));
         for (int side = -1; side <= 1; side += 2) {
             const Matrix wing = MatrixMultiply(MatrixRotateX(-side * (0.45f + flap)), MatrixTranslate(-0.08f, 0.64f, side * 0.17f));
@@ -2956,7 +3020,7 @@ static void DrawCat(float x, bool walking)
     head = MatrixMultiply(head, MatrixTranslate(0.33f, 0.76f + 0.02f * sinf(phase * 2), 0.04f));
     head = MatrixMultiply(head, root);
     DrawShape(sCatHead, head, plain, 0.48f);
-    DrawShape(sCatHat, head, plain, gCfg.hat == 10 ? 0.85f : 0.3f);
+    DrawShape(sCatHat, head, plain, gWearHat == 10 ? 0.85f : 0.3f);
     // Rosy cheeks all the time, rosier when happy.
     DrawShape(sCatBlush, head, plain, joy > 0.3f ? 0.9f : 0.45f);
     const bool blinking = fmodf(gScene.time, 3.7f) < 0.12f;
@@ -3384,6 +3448,30 @@ static void Paw2(float cx, float cy, float size, Color c)
     Poly2(cx + size * 0.62f, cy - size * 0.4f, size * 0.26f, size * 0.3f, 6, 0, c);
 }
 
+// The currency: a little fish facing right.
+static const Color kFish = { 96, 170, 214, 255 };
+static void Fish2(float cx, float cy, float size, Color c)
+{
+    Poly2(cx + size * 0.2f, cy, size * 0.8f, size * 0.55f, 8, 0, c);
+    DrawTriangle(Vector2{ cx - size * 0.4f, cy }, Vector2{ cx - size * 1.1f, cy - size * 0.6f }, Vector2{ cx - size * 1.1f, cy + size * 0.6f }, c);
+    DrawRectangle((int)(cx + size * 0.5f), (int)(cy - size * 0.3f), 1, 1, Color{ 50, 40, 70, 255 });
+}
+
+// An amount of fish with the fish after it, ending at `right`.
+static void FishAmount(int amount, int right, int y, Color text, bool plus = false)
+{
+    Fish2((float)right - 6, (float)y + 5, 5.0f, kFish);
+    Text(TextFormat(plus ? "+%d" : "%d", amount), right - 15, y, 10, text, 2, false);
+}
+
+// How far into the current level the player is.
+static void LevelBar(int x, int y, int w, float fill)
+{
+    Card(x, y, w, 7, kPaperDeep, kLine, false);
+    const int inner = (int)((w - 2) * std::clamp(fill, 0.0f, 1.0f));
+    if (inner > 0) DrawRectangle(x + 1, y + 1, inner, 5, kCoral);
+}
+
 // Small picture of what each action answers, used in the key legend.
 static void ActionIcon(int action, int cx, int cy)
 {
@@ -3465,7 +3553,7 @@ static void OpenSettings()
 static bool HasNewItems()
 {
     for (int i = 0; i < kItemCount; i++)
-        if (kItems[i].need != NEED_NONE && Unlocked(kItems[i]) && !((gProgress.known >> i) & 1)) return true;
+        if (kItems[i].how != HOW_FREE && Unlocked(i) && !((gProgress.known >> i) & 1)) return true;
     return false;
 }
 
@@ -3485,6 +3573,14 @@ static void DrawMenu()
 
     // Dress the cat, or change how the game behaves.
     const int by0 = gVH - 62;
+    {   // Level and fish, at a glance.
+        int into, span;
+        const int level = LevelOf(gProgress.xp, &into, &span), w = 196, x = leftCx - w / 2, y = by0 - 26;
+        Card(x, y, w, 18, kPaper, kLine);
+        Text(TextFormat("Level %d", level), x + 8, y + 4, 10, kCocoa, 0, false);
+        LevelBar(x + 62, y + 6, 66, (float)into / span);
+        FishAmount(gProgress.fish, x + w - 6, y + 4, kCocoa);
+    }
     if (Button(leftCx - 100, by0, 96, 22, "Wardrobe") || Key(KEY_C)) { gState = ST_WARDROBE; gWardrobeSel = -1; }
     if (HasNewItems()) {   // something new is waiting in there
         Poly2((float)leftCx - 8, (float)by0 + 1, 4.5f, 4.5f, 8, 0, kCoralLine);
@@ -3780,7 +3876,7 @@ static void DrawPause()
 static void DrawResults()
 {
     int left, top;
-    const int pw = 300, ph = 272;
+    const int pw = 300, ph = 302;
     Panel(pw, ph, left, top, true);
     const int cx = left + pw / 2;
 
@@ -3808,25 +3904,49 @@ static void DrawResults()
         Text(kLabel[i], x, top + 159, 10, kCocoaSoft, 1, false);
     }
 
-    // What this walk unlocked, or failing that, the next thing within reach.
-    if (!gNewUnlocks.empty()) {
-        const int more = (int)gNewUnlocks.size() - 1;
-        const char* line = more > 0 ? TextFormat("unlocked: %s  +%d more", kItems[gNewUnlocks[0]].name, more) : TextFormat("unlocked: %s", kItems[gNewUnlocks[0]].name);
-        const int w = std::min(pw - 28, MeasureText(line, 10) + 34);
-        Card(cx - w / 2, top + 178, w, 20, kPeach, kPeachLine, false);
-        Paw2((float)(cx - w / 2 + 12), (float)top + 189, 4.5f, kCoral);
-        Text(line, cx + 8, top + 183, 10, kCocoa, 1, false);
-    } else {
-        for (const Item& it : kItems) {
-            if (Unlocked(it)) continue;
-            Text(Fit(TextFormat("next: %s - %s", it.name, Requirement(it)), 10, pw - 28).c_str(), cx, top + 183, 10, kCocoaSoft, 1, false);
-            break;
+    // What the walk paid. The bar and the fish count up, and the bar rolls over when a level is reached.
+    if (gEarn.counted) {
+        const float k = std::clamp((gScene.time - gEarn.at - 0.5f) / 1.4f, 0.0f, 1.0f), ease = 1.0f - (1.0f - k) * (1.0f - k);
+        int into, span;
+        const int level = LevelOf(gEarn.xpBefore + (int)lroundf(gEarn.xp * ease), &into, &span);
+        static int shownLevel = 0;
+        static float shownFor = -1.0f;
+        if (shownFor != gEarn.at) { shownFor = gEarn.at; shownLevel = gEarn.levelBefore; }
+        if (level > shownLevel) {   // the moment the bar rolls over
+            shownLevel = level;
+            PlaySfx(SFX_MILESTONE, 0.0f, 0.8f);
+            CatDo(ACT_HOP);
         }
+        Text(TextFormat("Level %d", level), left + 16, top + 178, 10, kCocoa, 0, false);
+        LevelBar(left + 70, top + 180, pw - 70 - 76, (float)into / span);
+        Text(TextFormat("+%d xp", gEarn.xp), left + pw - 16, top + 178, 10, kCocoaSoft, 2, false);
+        Text(TextFormat("Fish  (you have %d)", gProgress.fish), left + 16, top + 195, 10, kCocoa, 0, false);
+        FishAmount((int)lroundf(gEarn.fish * ease), left + pw - 16, top + 195, kCocoa, true);
+
+        if (gEarn.levelAfter > gEarn.levelBefore && level >= gEarn.levelAfter) {
+            std::string line = TextFormat("Level %d!  +%d fish", gEarn.levelAfter, gEarn.levelFish);
+            if (!gNewUnlocks.empty()) {
+                line += std::string("  -  new: ") + kItems[gNewUnlocks[0]].name;
+                if (gNewUnlocks.size() > 1) line += TextFormat(" +%d", (int)gNewUnlocks.size() - 1);
+            }
+            line = Fit(line, 10, pw - 62);
+            const int w = MeasureText(line.c_str(), 10) + 34;
+            Card(cx - w / 2, top + 212, w, 20, kPeach, kPeachLine, false);
+            Paw2((float)(cx - w / 2 + 12), (float)top + 223, 4.5f, kCoral);
+            Text(line.c_str(), cx + 8, top + 217, 10, kCocoa, 1, false);
+        } else if (gEarn.levelAfter == gEarn.levelBefore) {
+            const int next = NextLevelReward(gEarn.levelAfter);
+            const char* line = next >= 0 ? TextFormat("next reward: %s at level %d", kItems[next].name, kItems[next].amount)
+                                         : TextFormat("level %d pays %d fish", gEarn.levelAfter + 1, LevelFish(gEarn.levelAfter + 1));
+            Text(line, cx, top + 217, 10, kCocoaSoft, 1, false);
+        }
+    } else {
+        Text("watch mode earns no fish or experience", cx, top + 195, 10, kCocoaSoft, 1, false);
     }
 
-    if (Button(cx - 70, top + 208, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
+    if (Button(cx - 70, top + 240, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
         StartGame();
-    } else if (Button(cx - 70, top + 240, 140, 18, "Back") || Key(KEY_ESCAPE)) {
+    } else if (Button(cx - 70, top + 272, 140, 18, "Back") || Key(KEY_ESCAPE)) {
         gState = ST_READY;
     }
 }
@@ -3835,13 +3955,14 @@ static void Equip(int slot, int n)
 {
     int* field[SLOT_COUNT] = { &gCfg.cat, &gCfg.hat, &gCfg.neck, &gCfg.back };
     *field[slot] = n;
-    BuildCat(gCfg.cat);
+    ShowEquipped();
     CatDo(ACT_HOP);   // a little hop to show it off
     PlaySfx(SFX_TWINKLE, 0.0f, 0.8f);
 }
 
 // The wardrobe: the camera comes in close on the cat, and a panel lists the
-// cats and everything they can wear, with what each locked item is waiting for.
+// cats and everything they can wear. Things that are not owned yet show their
+// price in fish or the level that brings them, and selecting one tries it on.
 static void DrawWardrobe()
 {
     int left, top;
@@ -3852,7 +3973,7 @@ static void DrawWardrobe()
 
     Paw2((float)left + 19, (float)top + 20, 6, kCoral);
     Text("Wardrobe", left + 32, top + 9, 20, kCocoa, 0, false);
-    Text(TextFormat("%d of %d", UnlockedCount(), kItemCount), left + pw - 14, top + 14, 10, kCocoaSoft, 2, false);
+    FishAmount(gProgress.fish, left + pw - 14, top + 14, kCocoa);
 
     static const char* kTabs[SLOT_COUNT] = { "Cat", "Hat", "Neck", "Back" };
     const int tw = (inner - 9) / 4;
@@ -3861,8 +3982,8 @@ static void DrawWardrobe()
     if (Key(KEY_RIGHT)) { gWardrobeTab = (gWardrobeTab + 1) % SLOT_COUNT; gWardrobeSel = -1; }
     if (Key(KEY_LEFT)) { gWardrobeTab = (gWardrobeTab + SLOT_COUNT - 1) % SLOT_COUNT; gWardrobeSel = -1; }
 
-    const int count = SlotSize(gWardrobeTab), rowH = 19, listY = top + 62;
-    if (gWardrobeSel < 0) gWardrobeSel = equipped[gWardrobeTab];
+    const int count = SlotSize(gWardrobeTab), rowH = 19, listY = top + 62, level = LevelOf(gProgress.xp);
+    if (gWardrobeSel < 0 || gWardrobeSel >= count) gWardrobeSel = equipped[gWardrobeTab];
     if (Key(KEY_DOWN)) gWardrobeSel = std::min(count - 1, gWardrobeSel + 1);
     if (Key(KEY_UP)) gWardrobeSel = std::max(0, gWardrobeSel - 1);
 
@@ -3870,10 +3991,10 @@ static void DrawWardrobe()
     for (int n = 0; n < count; n++) {
         const int index = ItemIndex(gWardrobeTab, n), y = listY + n * rowH;
         const Item& it = kItems[index];
-        const bool open = Unlocked(it), worn = equipped[gWardrobeTab] == n;
+        const bool open = Unlocked(index), worn = equipped[gWardrobeTab] == n;
         const bool hot = CheckCollisionPointRec(Mouse(), Rectangle{ (float)x0, (float)y, (float)inner, (float)(rowH - 2) });
         if (worn) Card(x0, y, inner, rowH - 2, kPeach, kPeachLine, false);
-        else if (hot || n == gWardrobeSel) Card(x0, y, inner, rowH - 2, kPaperDeep, kLine, false);
+        else if (hot || n == gWardrobeSel) Card(x0, y, inner, rowH - 2, kPaperDeep, n == gWardrobeSel ? kPeachLine : kLine, false);
 
         if (worn) Paw2((float)x0 + 10, (float)y + 9, 4.5f, kCoral);
         else if (open) Poly2((float)x0 + 10, (float)y + 8, 3.0f, 3.0f, 8, 0, Fade(kLine, 0.9f));
@@ -3881,24 +4002,57 @@ static void DrawWardrobe()
 
         const char* note = gWardrobeTab == SLOT_CAT ? kCats[n].note : nullptr;
         Text(it.name, x0 + 22, y + 4, 10, open ? kCocoa : kCocoaSoft, 0, false);
-        if (!open) {
-            Text(Requirement(it), x0 + inner - 6, y + 4, 10, kCocoaSoft, 2, false);
-        } else if (it.need != NEED_NONE && !((gProgress.known >> index) & 1)) {
+        if (!open && it.how == HOW_BUY) {
+            FishAmount(it.amount, x0 + inner - 6, y + 4, gProgress.fish >= it.amount ? kCocoa : kCocoaSoft);
+        } else if (!open) {
+            Text(TextFormat("level %d", it.amount), x0 + inner - 6, y + 4, 10, kCocoaSoft, 2, false);
+        } else if (it.how != HOW_FREE && !((gProgress.known >> index) & 1)) {
             Card(x0 + inner - 34, y + 2, 30, 13, kCoral, kCoralLine, false);
             Text("new", x0 + inner - 19, y + 3, 10, kCream, 1, false);
         } else if (note) {
             Text(note, x0 + inner - 6, y + 4, 10, kCocoaSoft, 2, false);
         }
-        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) { gWardrobeSel = n; pick = n; }
+        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) {
+            gWardrobeSel = n;   // a click wears what is owned and tries on what is not
+            if (open) pick = n;
+            else PlaySfx(SFX_CLICK, 3.0f);
+        }
     }
-    if (pick >= 0) {
-        if (Unlocked(kItems[ItemIndex(gWardrobeTab, pick)])) { if (equipped[gWardrobeTab] != pick) Equip(gWardrobeTab, pick); }
-        else PlaySfx(SFX_MISS, 0.0f, 0.7f);
+
+    // The selected thing, if it is not owned yet: what it takes, and a way to buy it.
+    const int selIndex = ItemIndex(gWardrobeTab, gWardrobeSel);
+    const Item& sel = kItems[selIndex];
+    const bool locked = !Unlocked(selIndex);
+    bool buy = false;
+    if (locked && sel.how == HOW_BUY) {
+        if (gProgress.fish >= sel.amount) {
+            buy = Button(x0, top + ph - 30, 150, 22, TextFormat("Buy for %d fish", sel.amount), 1) || pick == gWardrobeSel;
+        } else {
+            Text("trying it on", x0, top + ph - 34, 10, kCocoaSoft, 0, false);
+            Text(TextFormat("%d more fish to go", sel.amount - gProgress.fish), x0, top + ph - 21, 10, kCocoa, 0, false);
+            if (pick == gWardrobeSel) PlaySfx(SFX_MISS, 0.0f, 0.7f);
+        }
+    } else if (locked) {
+        Text("trying it on", x0, top + ph - 34, 10, kCocoaSoft, 0, false);
+        Text(TextFormat("a reward for level %d  (you are %d)", sel.amount, level), x0, top + ph - 21, 10, kCocoa, 0, false);
+        if (pick == gWardrobeSel) PlaySfx(SFX_MISS, 0.0f, 0.7f);
     }
+    if (buy && Buy(selIndex)) {
+        PlaySfx(SFX_MILESTONE, 0.0f, 0.7f);
+        Equip(gWardrobeTab, gWardrobeSel);
+    } else if (pick >= 0 && !locked && equipped[gWardrobeTab] != pick) {
+        Equip(gWardrobeTab, pick);
+    }
+
+    // The model wears what is equipped, except that a selected thing that is not owned is tried on.
+    int want[SLOT_COUNT] = { gCfg.cat, gCfg.hat, gCfg.neck, gCfg.back };
+    if (!Unlocked(selIndex)) want[gWardrobeTab] = gWardrobeSel;
+    if (memcmp(want, gShown, sizeof(want)) != 0) ShowCat(want[SLOT_CAT], want[SLOT_HAT], want[SLOT_NECK], want[SLOT_BACK]);
 
     if (Button(left + pw - 14 - 90, top + ph - 30, 90, 22, "Done", 1) || Key(KEY_ESCAPE)) {
         for (int i = 0; i < kItemCount; i++)   // everything unlocked has now been seen
-            if (Unlocked(kItems[i])) gProgress.known |= 1u << i;
+            if (Unlocked(i)) gProgress.known |= 1u << i;
+        ShowEquipped();
         SaveProgress();
         SaveSettings();
         gState = ST_MENU;
@@ -3983,6 +4137,10 @@ static void DrawSettings()
                 Text(value, right, y, 10, kCocoa, 2, false);
                 y += 17;
             };
+            int into, span;
+            const int level = LevelOf(gProgress.xp, &into, &span);
+            line("Level", TextFormat("%d  (%d of %d xp)", level, into, span));
+            line("Fish", TextFormat("%d", gProgress.fish));
             line("Songs finished", TextFormat("%d", gProgress.songs));
             line("Purrfect hits", TextFormat("%d", gProgress.perfects));
             line("Best streak", TextFormat("%d", gProgress.bestStreak));
@@ -3992,11 +4150,11 @@ static void DrawSettings()
             y += 8;
             const bool armed = gScene.time < gResetArmedUntil;
             if (Button(x0, y, 170, 20, armed ? "Click again to erase it all" : "Reset progress", armed ? 2 : 0)) {
-                if (armed) {   // forgets unlocks and lifetime numbers; songs and their best ranks stay
+                if (armed) {   // forgets fish, level, everything bought and the lifetime numbers; songs and their best ranks stay
                     gProgress = Progress();
                     gResetArmedUntil = -1.0f;
                     CheckEquipped();
-                    BuildCat(gCfg.cat);
+                    ShowEquipped();
                     SaveProgress();
                 } else {
                     gResetArmedUntil = gScene.time + 3.0f;
@@ -4046,6 +4204,9 @@ static void DrawFrame(double t)
 static std::atomic<bool> gRobotStop{ false };
 static std::atomic<int>  gRobotSent{ 0 }, gRobotBlocked{ 0 };
 static std::atomic<int>  gRobotPauseSeen{ 0 };   // 1 if the game was paused when checked, -1 if it was not
+static std::atomic<bool> gRobotFinished{ false };
+// What the robot saw when it went shopping after the song.
+static struct { bool inWardrobe = false, backInMenu = false; int fishBefore = 0, fishAfter = 0, triedOn = -1, hat = -1; unsigned ownedBefore = 0, ownedAfter = 0; } gShop;
 
 static void RobotThread(void* window)
 {
@@ -4056,7 +4217,13 @@ static void RobotThread(void* window)
     };
     while (!gRobotStop && gState != ST_READY) PlatformSleep(0.05);
     PlatformSleep(0.8);
-    tap(0x0D);   // Enter on the song screen starts the walk
+    // Enter on the song screen starts the walk. If something else took the keyboard for a moment, try again.
+    for (int tries = 0; tries < 5 && !gRobotStop && gState == ST_READY; tries++) {
+        const bool front = PlatformFocusWindow(window);
+        tap(0x0D);
+        PlatformSleep(0.6);
+        if (gLog) fprintf(gLog, "start: Enter sent (try %d, window in front: %s), state is now %d\n", tries + 1, front ? "yes" : "NO", (int)gState);
+    }
     while (!gRobotStop && gState != ST_PLAYING) PlatformSleep(0.02);
 
     size_t next = 0;
@@ -4092,6 +4259,27 @@ static void RobotThread(void* window)
         next++;
     }
     for (int lane = 0; lane < 4; lane++) PlatformSendLaneKey(window, lane, false);
+
+    // Then go shopping: back to the menu, into the wardrobe, down to the first hat for sale, buy it, leave.
+    for (int i = 0; i < 30 && !gRobotStop; i++) PlatformSleep(0.1);   // let the results count up
+    if (!gRobotStop && gState == ST_RESULTS) {
+        tap(0x1B); PlatformSleep(0.4);   // Esc: back to the song screen
+        tap(0x1B); PlatformSleep(0.4);   // Esc: back to the menu
+        tap('C');  PlatformSleep(0.8);
+        gShop.inWardrobe = gState == ST_WARDROBE;
+        gShop.fishBefore = gProgress.fish;
+        gShop.ownedBefore = gProgress.owned;
+        tap(0x28); PlatformSleep(0.3);   // Down, twice: No hat -> Bow -> Flower crown
+        tap(0x28); PlatformSleep(0.6);
+        gShop.triedOn = gShown[SLOT_HAT];
+        tap(0x0D); PlatformSleep(0.6);   // Enter buys it
+        gShop.fishAfter = gProgress.fish;
+        gShop.ownedAfter = gProgress.owned;
+        gShop.hat = gCfg.hat;
+        tap(0x1B); PlatformSleep(0.5);   // Esc: done
+        gShop.backInMenu = gState == ST_MENU;
+    }
+    gRobotFinished = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4145,6 +4333,7 @@ int main(int argc, char** argv)
     // --shot <png> [--view menu|ready|play|pause|results|wardrobe|settings] [--at <seconds>] [--size WxH]
     //              [--diff 0..2] [--scenery 0..5] [--variant 0..2] [--cat 0..6] [--hat n] [--neck n] [--back n]
     //              [--tab 0..3] [--closeup] [--unlock-all] [--count] [--seq n] [--seq-step frames]
+    //              [--fish n] [--xp n] [--sel n]
     // --robot <log>                   end-to-end test: plays the demo with real key presses, silently, and logs what it measured
     // --sfx-dump <folder>             writes every sound effect as its own WAV
     //                                 renders offscreen with a simulated clock and saves one frame
@@ -4153,6 +4342,7 @@ int main(int argc, char** argv)
     std::string shotView = "play";
     double shotAt = 12.0;
     int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
+    int shotFish = -1, shotXp = -1;
     const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
@@ -4169,6 +4359,9 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--back") && i + 1 < argc) gCfg.back = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tab") && i + 1 < argc) gWardrobeTab = gSettingsTab = std::clamp(atoi(argv[++i]), 0, 3);
         else if (!strcmp(argv[i], "--unlock-all")) gUnlockAll = true;
+        else if (!strcmp(argv[i], "--fish") && i + 1 < argc) shotFish = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--xp") && i + 1 < argc) shotXp = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sel") && i + 1 < argc) gWardrobeSel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
         else if (!strcmp(argv[i], "--seq") && i + 1 < argc) seqLeft = std::max(0, atoi(argv[++i]) - 1);
@@ -4210,7 +4403,10 @@ int main(int argc, char** argv)
     } else {
         if (shotDiff >= 0) gCfg.diff = std::clamp(shotDiff, 0, DIFF_COUNT - 1);
         if (shotScenery >= 0) gCfg.scenery = std::clamp(shotScenery, 0, (int)BIOME_COUNT);
+        gKeepSettings = true;   // screenshots never write the player's settings
         if (shotCat >= 0) gCfg.cat = shotCat;
+        if (shotFish >= 0) gProgress.fish = shotFish;
+        if (shotXp >= 0) gProgress.xp = shotXp;
         // Screenshots never touch the real library; the menu gets a sample shelf instead.
         static const char* kSample[6] = { "Sunday Morning Tea", "Rooftop Lullaby", "Paper Lanterns", "Tiny Planet Waltz", "Rain on the Greenhouse", "Marmalade Skies" };
         static const float kSampleBest[6] = { 0.97f, 0.91f, -1.0f, 0.82f, 0.70f, -1.0f };
@@ -4233,7 +4429,7 @@ int main(int argc, char** argv)
     if (!gSim || !gUnlockAll) CheckEquipped();
     gCfg.cat = std::clamp(gCfg.cat, 0, kCatCount - 1);
     BuildShapes();
-    BuildCat(gCfg.cat);
+    ShowEquipped();
     UpdateCanvas();
 
     // Frame pacing is done here rather than left to v-sync (which drivers can
@@ -4337,6 +4533,7 @@ int main(int argc, char** argv)
                 robotDone = NowSeconds();
                 const double played = std::max(1.0, robotDone - robotStart);
                 fprintf(gLog, "\n%s\n", timedOut ? "TIMED OUT before the song ended" : "song finished");
+                if (timedOut) fprintf(gLog, "state %d, window focused: %s\n", (int)gState, IsWindowFocused() ? "yes" : "no");
                 fprintf(gLog, "keys: %d sent, %d blocked (window not in front); read through %s\n", gRobotSent.load(), gRobotBlocked.load(),
                         gRawKeys ? "the raw input thread" : "per-frame polling");
                 fprintf(gLog, "timing: %d hits, sent vs measured differs by %.2f ms on average, %.2f ms at worst\n", gHitErrorCount,
@@ -4360,12 +4557,20 @@ int main(int argc, char** argv)
                         std::fabs(gRig.x) + std::fabs(gRig.y) + std::fabs(gRig.roll) + std::fabs(gRig.zoom) < 0.05f ? "yes" : "NO");
                 fprintf(gLog, "unlocked by this walk: %d item(s)", (int)gNewUnlocks.size());
                 for (int index : gNewUnlocks) fprintf(gLog, "  [%s]", kItems[index].name);
+                fprintf(gLog, "\npaid: %d fish and %d xp for the walk, %d fish for levels reached (level %d -> %d)", gEarn.fish, gEarn.xp, gEarn.levelFish,
+                        gEarn.levelBefore, gEarn.levelAfter);
+                fprintf(gLog, "\nnow: level %d, %d xp, %d fish", LevelOf(gProgress.xp), gProgress.xp, gProgress.fish);
                 fprintf(gLog, "\nprogress now: %d song(s), %d purrfect, best streak %d, best rank %d, places mask %d\n", gProgress.songs, gProgress.perfects,
                         gProgress.bestStreak, gProgress.bestRank, gProgress.places);
                 if (const SongEntry* e = FindSong(gSongPath)) fprintf(gLog, "library: \"%s\" best on difficulty %d: %.4f, score %d\n", e->name.c_str(), gCfg.diff, e->best[gCfg.diff], e->score[gCfg.diff]);
                 fflush(gLog);
             }
-            if (robotDone > 0.0 && NowSeconds() - robotDone > 1.5) quit = true;
+            if (robotDone > 0.0 && (gRobotFinished || NowSeconds() - robotDone > 20.0)) {
+                fprintf(gLog, "shop: wardrobe opened: %s; tried on hat %d while it was not owned; fish %d -> %d; owned mask %u -> %u; wearing hat %d; back in menu: %s\n",
+                        gShop.inWardrobe ? "yes" : "NO", gShop.triedOn, gShop.fishBefore, gShop.fishAfter, gShop.ownedBefore, gShop.ownedAfter, gShop.hat,
+                        gShop.backInMenu ? "yes" : "NO");
+                quit = true;
+            }
         }
 
         if (!gSim && (IsWindowMinimized() || PlatformWindowMinimized(GetWindowHandle()))) {   // nothing to show: keep the events flowing and doze

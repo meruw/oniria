@@ -100,7 +100,8 @@ bool PlatformSendLaneKey(void* window, int lane, bool down)
 
 bool PlatformSendKey(void* window, int virtualKey, bool down)
 {
-    return SendScan(window, (WORD)MapVirtualKeyW((UINT)virtualKey, MAPVK_VK_TO_VSC), false, down);
+    const bool extended = (virtualKey >= 0x21 && virtualKey <= 0x28) || virtualKey == 0x2D || virtualKey == 0x2E;   // arrows and their neighbours
+    return SendScan(window, (WORD)MapVirtualKeyW((UINT)virtualKey, MAPVK_VK_TO_VSC), extended, down);
 }
 
 void PlatformSleep(double seconds)

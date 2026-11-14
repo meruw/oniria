@@ -2,6 +2,22 @@
 
 Newest entries first.
 
+## 2026-11-13: fish and levels
+
+The previous entry measured that the unlock conditions went by too fast, and the entry before it said a cozy game should not have an economy. The second opinion lost: unlocking by one-off conditions gave no reason to come back to a song, and what was wanted is a game that rewards playing again and again.
+
+**Fish.** Every finished walk pays fish, and ten of the things to wear are now bought with them, from 80 for the flower crown to 400 for the top hat (1950 for everything). Pay follows the length of the song and the accuracy, with small bonuses for rank, a clean walk and a new best. It deliberately does not follow the number of notes, so Cozy pays nearly what Zoomies does.
+
+**Levels.** Experience comes from the same walks and raises a level. Each level pays a few fish, and ten levels between 2 and 20 bring a reward that fish cannot buy: the four cats that were locked, and the bow tie, party hat, headphones, wings, crown and halo. The results screen counts the fish up and fills the bar, rolling over with a little fanfare when a level is reached; the menu always shows both.
+
+**Trying things on.** Selecting something not owned puts it on the cat without equipping it, so a price is never paid blind. The model now wears "what it is told to" rather than reading the settings directly, which is what made that a few lines.
+
+**Numbers.** A three-minute song at 92% on Playful pays about 105 fish and 330 experience. Level 5 is three or four such songs away, level 10 about twelve, level 20 about fifty; buying everything takes roughly fifteen. These are first guesses and easy to move: they are six constants and one table.
+
+**Checked.** The end-to-end test now goes shopping after the song. With a save seeded at 100 fish: the walk paid 41 fish and 96 experience, reached level 2 (30 more fish and the bow tie), the wardrobe opened, the flower crown was tried on while not owned, Enter bought it (171 fish to 91), and the save file held all of it. The first attempt at this run never started the song: the Enter that should have started it did not reach the game, for a reason that was not found. The test now retries that key press, and the run after that was clean.
+
+**A small fix on the way.** Screenshot mode wrote the settings file when a simulated song ended. It no longer writes anything.
+
 ## 2026-11-13: clothes that fit, and a test that presses real keys
 
 **Cosmetics.** Hats were placed by eye at fixed heights and several sank into the head or hovered over it; the beanie's cuff was a plate. They are now built from ellipses that follow the head's own shape. Collars, the bow tie, the scarf, the bandana and the garland were level rings, which the oversized head simply hid; they now lie in a plane that leans forward, so the front half shows under the chin. The backpack was a box mostly behind the head; it is a rounded bag further back, with a flap, pockets and a button. The scarf's hanging end reached the paws and looked like a post; it is a short tail on the chest. Wings got some colour so they show on the white cat.

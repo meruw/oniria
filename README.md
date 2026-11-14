@@ -39,20 +39,34 @@ Every hit in a row makes the walk happier, and a miss calms it back down:
 
 Seven cats share the walk: Mango the orange tabby, Domino the tuxedo, Mochi the calico, Luna the siamese, Pebble the british blue, Cloud the fluffy white one and Midnight the black cat. They differ in coat pattern, colours, eye colour and a few proportions, and all of them are built like kittens: a big head, big low-set eyes, rosy cheeks, whiskers, a short body and stubby legs with round paws.
 
-### Wardrobe and unlocks
+### Fish, levels and the wardrobe
 
-The **Wardrobe** (from the main menu, or `C`) brings the camera in close and lets you choose the cat and what it wears: something on its head, around its neck and on its back. You start with three cats, a bow and a bell collar. Everything else is earned by playing, and each item says what it is waiting for and how far along you are:
+Every walk you finish pays two things:
 
-| Earned by | Unlocks |
+- **Fish**, the currency. A walk pays more the longer the song and the better it went, a little more on harder difficulties, plus a bonus for the rank, for a walk with no misses and for a new best. A three-minute song played well pays around 100.
+- **Experience**, which raises your **level**. Each level asks for a little more than the last, pays a few fish when you reach it, and some levels bring a reward that cannot be bought.
+
+The **Wardrobe** (from the main menu, or `C`) brings the camera in close and lets you choose the cat and what it wears: something on its head, around its neck and on its back. You start with three cats, a bow and a bell collar. Select anything you do not own and the cat tries it on, so you can see it before spending.
+
+| Bought with fish | |
 | --- | --- |
-| Finishing songs | Bow tie (1), Luna (3), Balloon (5), Midnight (6), Headphones (10) |
-| Purrfect hits, in total | Flower crown (50), Scarf (150), Pebble (300) |
-| Your best streak | Party hat (25), Bandana (40), Cloud (60), Wings (100) |
-| Ranks | Top hat (an A), Crown (an S), Halo (a song with no misses) |
-| Places walked through | Straw hat (seaside), Beanie (snowy village), Witch hat (autumn woods), Flower garland (blossom garden) |
-| Time spent walking | Backpack (10 minutes) |
+| Hats | Flower crown (80), Straw hat (150), Beanie (150), Witch hat (250), Top hat (400) |
+| Neck | Scarf (100), Bandana (120), Flower garland (200) |
+| Back | Backpack (200), Balloon (300) |
 
-Nothing is bought and nothing is random. Watch mode does not count. The results screen tells you what a walk unlocked, or what is next within reach.
+| Level | Reward | Level | Reward |
+| --- | --- | --- | --- |
+| 2 | Bow tie | 10 | Cloud, the fluffy white cat |
+| 3 | Luna, the siamese | 12 | Wings |
+| 5 | Party hat | 15 | Midnight, the black cat |
+| 6 | Pebble, the british blue | 18 | Crown |
+| 8 | Headphones | 20 | Halo |
+
+Nothing is random and nothing costs real money. Watch mode earns nothing. The results screen counts up what the walk paid, shows the level bar filling, and says what the next reward is. Your level and fish are always on the main menu.
+
+| Trying on a hat before buying it | A walk that reached a new level |
+| --- | --- |
+| ![Wardrobe shop](docs/img/shop.png) | ![Level up](docs/img/level-up.png) |
 
 | Flower crown | Beanie, scarf and balloon | Straw hat, scarf and backpack |
 | --- | --- | --- |
@@ -163,11 +177,12 @@ The long version is in [docs/how-it-works.md](docs/how-it-works.md), and the sto
   | Audio | callback 100 times a second, the whole song delivered; the game clock stayed 0.2 ms from the audio thread on average (10 ms at its worst moment) and never had to resync |
   | Frames | 120 per second, 8.33 ms on average; at most two frames over 20 ms in a run |
   | Pause and resume | pauses on Esc, resumes on Enter, timing unaffected afterwards |
-  | Saving | best score, library entry and lifetime progress written to disk and read back by the next run; unlocks announced |
+  | Saving | best score, library entry and lifetime progress written to disk and read back by the next run |
+  | Fish and levels | a later run with the economy in place: the walk paid 41 fish and 96 experience, reached level 2 and its reward, then the test opened the wardrobe with real keys, tried a hat on and bought it (171 fish to 91); all of it was on disk afterwards |
 
 - **Sound effects** were measured rather than heard: no clipping, no DC offset, attacks of 3 to 13 ms (no clicks), and practically no energy above 4 kHz.
 
-Still not verified, because it needs a person: how the timing *feels* (injected keys skip the keyboard itself, and the delay between the audio callback and the speakers cannot be measured from inside the program, which is what the audio offset setting is for), whether the sounds are pleasant, how well the charts fit music other than the two test tracks, and whether the unlock pace feels right.
+Still not verified, because it needs a person: how the timing *feels* (injected keys skip the keyboard itself, and the delay between the audio callback and the speakers cannot be measured from inside the program, which is what the audio offset setting is for), whether the sounds are pleasant, how well the charts fit music other than the two test tracks, and whether the prices and the level curve feel right.
 
 ## Project layout
 
