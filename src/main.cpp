@@ -136,6 +136,7 @@ struct SongEntry {
 };
 static std::vector<SongEntry> gLibrary;
 static const char* const kDemoKey = "<demo>";   // stands in for a path on the built-in track
+static const char* const kTutorialKey = "<tutorial>";   // and for the guided walk, which plays over the same track
 
 static std::string LibraryPath() { return std::string(GetApplicationDirectory()) + "oniria.songs"; }
 
@@ -174,6 +175,13 @@ static void LoadLibrary()
         demo.name = "Demo track";
         demo.duration = 49.0f;
         gLibrary.push_back(demo);
+    }
+    if (!FindSong(kTutorialKey)) {   // new players find it at the top
+        SongEntry guide;
+        guide.path = kTutorialKey;
+        guide.name = "How to play";
+        guide.duration = 49.0f;
+        gLibrary.insert(gLibrary.begin(), guide);
     }
 }
 
@@ -388,6 +396,10 @@ static State gFrameState = ST_MENU; // state when the current frame began
 static bool  gSim = false;          // screenshot mode: no audio device, fixed time step
 static double gSimTime = 0.0;
 
+// The guided walk: the built-in track with a chart written by hand, one part
+// for each action and then all four together, with a line of advice on screen.
+static bool gTutorial = false, gWantTutorial = false, gJobTutorial = false;
+
 // A key press belongs to the screen that was showing when the frame began, so
 // the Esc that pauses the game is not also read as "resume" by the pause menu.
 static bool Key(int key) { return gState == gFrameState && IsKeyPressed(key); }
@@ -437,6 +449,7 @@ static void CatDo(int action) { gCatAction = action; gCatActionAge = 0.0f; }
 
 // End-to-end test (--robot): a thread presses real keys, the game logs what it measured.
 static FILE* gLog = nullptr;
+static std::atomic<int> gRobotBackTo{ -1 };   // set when the lesson rewinds: the note the robot should go back to
 static std::vector<float> gRobotPlan;   // per note: how late the robot means to be, in seconds; NaN = miss it on purpose
 static std::vector<float> gRobotDid;    // per note: how late it really was when it handed the key to the system
 static double gHitErrorSum = 0.0, gHitErrorMax = 0.0;   // difference between meant and measured timing
@@ -1549,6 +1562,7 @@ struct Progress {
     int places = 0;          // bit per place walked through
     float minutes = 0.0f;
     int fish = 0, xp = 0;
+    int guided = 0;          // 1 once the guided walk has been finished
     unsigned owned = 0;      // bit per item bought
     unsigned known = 0;      // bit per item already seen unlocked in the wardrobe
 };
@@ -1675,6 +1689,7 @@ static void LoadProgress()
         else if (!strcmp(key, "fish")) gProgress.fish = std::max(0, (int)v);
         else if (!strcmp(key, "xp")) gProgress.xp = std::max(0, (int)v);
         else if (!strcmp(key, "owned")) gProgress.owned = (unsigned)v;
+        else if (!strcmp(key, "guided")) gProgress.guided = (int)v;
         else if (!strcmp(key, "known")) gProgress.known = (unsigned)v;
     }
     fclose(f);
@@ -1685,9 +1700,9 @@ static void SaveProgress()
     if (gSim) return;
     FILE* f = fopen(ProgressPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nfish=%d\nxp=%d\nowned=%u\nknown=%u\n",
+    fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nfish=%d\nxp=%d\nowned=%u\nknown=%u\nguided=%d\n",
             gProgress.songs, gProgress.perfects, gProgress.bestStreak, gProgress.bestRank, gProgress.fullCombos,
-            gProgress.places, gProgress.minutes, gProgress.fish, gProgress.xp, gProgress.owned, gProgress.known);
+            gProgress.places, gProgress.minutes, gProgress.fish, gProgress.xp, gProgress.owned, gProgress.known, gProgress.guided);
     fclose(f);
 }
 
@@ -1707,6 +1722,7 @@ static bool Buy(int index)
 struct Earnings {
     bool counted = false;                    // false in watch mode
     int fish = 0, xp = 0, levelFish = 0;     // levelFish: paid on top for the levels reached
+    int lessonFish = 0;                      // part of `fish`: the one-time thank-you for finishing the guided walk
     int xpBefore = 0, levelBefore = 1, levelAfter = 1;
     float at = 0.0f;                         // when the results appeared, for the counting-up
 };
@@ -1891,6 +1907,31 @@ static void LoadWorker(std::string path, bool demo)
     gJob.stage.store(3);
 }
 
+static const int kTutorialParts = 5, kTutorialBeats = 16;   // sixteen beats a part; the first four are for reading
+static int    gTutorialFirst[kTutorialParts + 1];           // the first note of each part
+static int    gTutorialTries[kTutorialParts], gTutorialPart = 0;
+static double gTutorialAgainUntil = -1.0;                   // song time until which "once more" is shown
+static double TutorialBeat() { return DemoSixteenthSeconds() * 4.0; }
+static double TutorialPartStart(int part) { return (4 + part * kTutorialBeats) * TutorialBeat(); }
+
+// Replaces the analysed charts with the lesson. Here `lane` is the action itself.
+static void BuildTutorialCharts(SongAnalysis& song)
+{
+    static const uint8_t kMix[12] = { 0, 1, 0, 2, 1, 3, 0, 2, 1, 3, 2, 0 };
+    Chart chart;
+    for (int part = 0; part < kTutorialParts; part++) {
+        gTutorialFirst[part] = (int)chart.time.size();
+        for (int beat = 4; beat < kTutorialBeats; beat += part < 4 ? 2 : 1) {
+            chart.time.push_back(TutorialPartStart(part) + beat * TutorialBeat());
+            chart.lane.push_back(part < 4 ? (uint8_t)part : kMix[(beat - 4) % 12]);
+        }
+    }
+    gTutorialFirst[kTutorialParts] = (int)chart.time.size();
+    for (Chart& c : song.charts) c = chart;
+}
+
+static void StartGame();
+
 static void BeginLoad(const std::string& path, bool demo)
 {
     if (gState == ST_LOADING) return;
@@ -1898,6 +1939,9 @@ static void BeginLoad(const std::string& path, bool demo)
     gError.clear();
     gJob.name = demo ? "Demo track" : GetFileNameWithoutExt(path.c_str());
     gJob.path = demo ? kDemoKey : path;
+    gJobTutorial = demo && gWantTutorial;
+    gWantTutorial = false;
+    if (gJobTutorial) { gJob.name = "How to play"; gJob.path = kTutorialKey; }
     gState = ST_LOADING;
     if (gSim) { LoadWorker(path, demo); return; }
     gJob.thread = std::thread(LoadWorker, path, demo);
@@ -1941,11 +1985,13 @@ static void FinishLoad()
     gSong = std::move(gJob.song);
     gSongName = gJob.name;
     gSongPath = gJob.path;
-    if (!gSim) RememberSong(gSongPath, gSongName, (float)gSong.duration);
-    gMenuSel = 0;
-    gMenuScroll = 0;
+    gTutorial = gJobTutorial;
+    if (gTutorial) BuildTutorialCharts(gSong);
+    else if (!gSim) RememberSong(gSongPath, gSongName, (float)gSong.duration);
+    if (!gTutorial) { gMenuSel = 0; gMenuScroll = 0; }
     BuildPathHeights();
     gState = ST_READY;
+    if (gTutorial) StartGame();   // no song screen: the lesson uses all four keys and starts at once
 }
 
 // ---------------------------------------------------------------------------
@@ -1959,7 +2005,11 @@ static void StartGame()
     gNoteState.assign(n, 0);
     gNoteWhen.assign(n, 0.0f);
     gNoteAction.resize(n);
-    for (size_t i = 0; i < n; i++) gNoteAction[i] = (uint8_t)kLaneAction[gCfg.diff][gChart->lane[i]];
+    for (size_t i = 0; i < n; i++) gNoteAction[i] = gTutorial ? gChart->lane[i] : (uint8_t)kLaneAction[gCfg.diff][gChart->lane[i]];
+    memset(gTutorialTries, 0, sizeof(gTutorialTries));
+    gTutorialPart = 0;
+    gTutorialAgainUntil = -1.0;
+    if (gTutorial && !gSim) gCfg.watch = false;   // a lesson is for playing
     gHead = gTail = 0;
     gScore = gCombo = gMaxCombo = 0;
     memset(gCount, 0, sizeof(gCount));
@@ -1991,6 +2041,8 @@ static void StartGame()
         gRobotDid.assign(n, 0.0f);
         for (size_t i = 0; i < n; i++)
             gRobotPlan[i] = i % 25 == 24 ? NAN : 0.012f * sinf((float)i * 1.7f) + (i % 7 == 3 ? 0.06f : 0.0f);
+        if (gTutorial)   // in the lesson, let the whole first part go by, to see it offered again
+            for (int i = 0; i < gTutorialFirst[1]; i++) gRobotPlan[i] = NAN;
     }
     gScene.envIndex = -1;
     SeekAndPlay(-kLeadIn);
@@ -2225,6 +2277,11 @@ static void FinishGame()
         gEarn.counted = true;
         gEarn.xp = 10 + (int)lroundf(minutes * 100.0f * acc * kDiffPay[gCfg.diff]);
         gEarn.fish = 5 + (int)lroundf(minutes * 30.0f * acc * acc * kDiffPay[gCfg.diff]) + kRankFish[RankOf(acc)] + (clean ? 15 : 0) + (gNewBest ? 5 : 0);
+        if (gTutorial && !gProgress.guided) {
+            gProgress.guided = 1;
+            gEarn.lessonFish = 50;
+            gEarn.fish += gEarn.lessonFish;
+        }
         gProgress.xp += gEarn.xp;
         gEarn.levelAfter = LevelOf(gProgress.xp);
         for (int level = gEarn.levelBefore + 1; level <= gEarn.levelAfter; level++) gEarn.levelFish += LevelFish(level);
@@ -2245,7 +2302,7 @@ static void UpdatePlaying(double t)
     LaneKeyEvent events[32];
     const int n = PlatformPollKeys(events, 32);
     if (n > 0) gRawKeys = true;
-    const int actions = kActionCount[gCfg.diff];
+    const int actions = gTutorial ? 4 : kActionCount[gCfg.diff];
     if (!gCfg.watch) {
         for (int i = 0; i < n; i++) {
             if (events[i].lane >= actions) continue;
@@ -2271,6 +2328,33 @@ static void UpdatePlaying(double t)
     }
     while (gTail < total && gChart->time[gTail] < t - 3.5) gTail++;
     if (!gCfg.watch || gSimCounts) gProgress.places |= 1 << BiomeNear(gScene.worldX);   // remember where the walk has been
+    if (gTutorial && !gCfg.watch && gTutorialPart < kTutorialParts && t >= TutorialPartStart(gTutorialPart + 1)) {
+        // The lesson waits for the player: a part where fewer than half the things were answered is
+        // played again, twice at most, before moving on.
+        const int first = gTutorialFirst[gTutorialPart], end = gTutorialFirst[gTutorialPart + 1];
+        int answered = 0;
+        for (int i = first; i < end; i++) answered += gNoteState[i] >= 1 && gNoteState[i] <= 3;
+        if (answered * 2 < end - first && gTutorialTries[gTutorialPart] < 2) {
+            gTutorialTries[gTutorialPart]++;
+            for (int i = first; i < end; i++) {
+                if (gNoteState[i]) gCount[gNoteState[i] - 1]--;
+                gNoteState[i] = 0;
+            }
+            if (gLog) {
+                fprintf(gLog, "lesson: part %d had %d of %d answered at %.2f s, playing it again from %.2f s\n", gTutorialPart + 1, answered, end - first, t,
+                        TutorialPartStart(gTutorialPart));
+                for (int i = first; i < end && i < (int)gRobotPlan.size(); i++) gRobotPlan[i] = 0.0f;
+                gRobotBackTo.store(first);
+            }
+            gHead = first;
+            gTail = std::min(gTail, first);
+            gCombo = 0;
+            SeekAndPlay(TutorialPartStart(gTutorialPart));
+            gTutorialAgainUntil = TutorialPartStart(gTutorialPart) + 4.0 * TutorialBeat();
+            return;
+        }
+        gTutorialPart++;
+    }
     if (t > gSong.duration + 0.6) FinishGame();
 }
 
@@ -3566,7 +3650,8 @@ static void PickSong(int index)
 {
     if (index < 0 || index >= (int)gLibrary.size()) return;
     const SongEntry entry = gLibrary[index];   // a copy: loading reorders the library
-    if (entry.path == kDemoKey) BeginLoad("", true);
+    if (entry.path == kTutorialKey) { gWantTutorial = true; BeginLoad("", true); }
+    else if (entry.path == kDemoKey) BeginLoad("", true);
     else BeginLoad(entry.path, false);
 }
 
@@ -3657,7 +3742,11 @@ static void DrawMenu()
 
         // Best result on any difficulty, or a little note for songs not finished yet.
         const float best = std::max(e.best[0], std::max(e.best[1], e.best[2]));
-        if (best >= 0.0f) {
+        const bool guide = e.path == kTutorialKey;
+        if (guide) {
+            Card(listX + 4, y + 3, 16, 16, kCoral, kCoralLine, false);
+            Text("?", listX + 12, y + 6, 10, kCream, 1, false);
+        } else if (best >= 0.0f) {
             const int rank = RankOf(best);
             Card(listX + 4, y + 3, 16, 16, kRankColour[rank], Fade(kCocoa, 0.35f), false);
             Text(kRankLetter[rank], listX + 12, y + 6, 10, kCream, 1, false);
@@ -3667,7 +3756,8 @@ static void DrawMenu()
             DrawRectangle(listX + 12, y + 5, 4, 2, kCoral);
         }
         const int secs = (int)e.duration;
-        Text(TextFormat("%d:%02d", secs / 60, secs % 60), listX + rowW - 6, y + 6, 10, kCocoaSoft, 2, false);
+        if (guide && gProgress.songs == 0) Text("start here", listX + rowW - 6, y + 6, 10, kCoralLine, 2, false);
+        else Text(TextFormat("%d:%02d", secs / 60, secs % 60), listX + rowW - 6, y + 6, 10, kCocoaSoft, 2, false);
         Text(Fit(e.name, 10, rowW - 30 - 40).c_str(), listX + 26, y + 6, 10, kCocoa, 0, false);
         if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) { gMenuSel = i; pick = i; PlaySfx(SFX_CLICK); }
     }
@@ -3684,7 +3774,7 @@ static void DrawMenu()
 
     if (gState != ST_MENU) return;   // the dialog started a load
     if (Key(KEY_ENTER) || Key(KEY_SPACE)) pick = gMenuSel;
-    if (Key(KEY_DELETE) && count > 0 && gLibrary[gMenuSel].path != kDemoKey) {
+    if (Key(KEY_DELETE) && count > 0 && gLibrary[gMenuSel].path != kDemoKey && gLibrary[gMenuSel].path != kTutorialKey) {
         gLibrary.erase(gLibrary.begin() + gMenuSel);   // forgets the song; the file itself is untouched
         SaveLibrary();
         return;
@@ -3847,11 +3937,23 @@ static void DrawHud(double t)
         const float in = std::min(1.0f, gMilestoneAge * 6.0f), out = std::clamp((1.6f - gMilestoneAge) / 0.4f, 0.0f, 1.0f);
         Text(TextFormat("x%d  %s", gMilestone, word), cx, 44 - (int)(8.0f * sinf(in * kPi)), 20, Fade(kCheer[(int)(gMilestoneAge * 8.0f) % 3], out));
     }
+    if (gTutorial) {
+        static const char* kTeach[kTutorialParts] = { "Logs: press D to hop over them", "Yarn balls: press F to bat them", "Butterflies: press J to swat at them",
+                                                      "Bells: press K to ring them", "Now all four together!" };
+        const int part = t < TutorialPartStart(0) ? -1 : (int)((t - TutorialPartStart(0)) / (kTutorialBeats * TutorialBeat()));
+        std::string line = part < 0 ? "Things come along the path in time with the music" : part >= kTutorialParts ? "That is all there is to it. Enjoy the walk!" : kTeach[part];
+        if (t < gTutorialAgainUntil) line = "Once more.  " + line;
+        const bool icon = part >= 0 && part < 4;
+        const int w = MeasureText(line.c_str(), 10) + (icon ? 40 : 20), y = 56;
+        Card(cx - w / 2, y, w, 20, kPaper, kLine);
+        if (icon) ActionIcon(part, cx - w / 2 + 14, y + 10);
+        Text(line.c_str(), cx + (icon ? 10 : 0), y + 5, 10, kCocoa, 1, false);
+    }
     Text(TextFormat("%.1f%%", Accuracy() * 100.0f), gVW - 10, 8, 10, kInk, 2);
     if (gCombo >= 3) Text(TextFormat("x%d", gCombo), gVW - 10, 22, gComboPop > 0.3f ? 20 : 10, kInk, 2);
 
     // Key hints above the next objects.
-    if (gCfg.hints && gChart && gState == ST_PLAYING) {
+    if ((gCfg.hints || gTutorial) && gChart && gState == ST_PLAYING) {
         const int total = (int)gChart->time.size();
         for (int i = gHead; i < total; i++) {
             if (gNoteState[i]) continue;
@@ -3867,7 +3969,7 @@ static void DrawHud(double t)
     }
 
     // Key legend along the bottom; a key lights up while it is held.
-    const int actions = kActionCount[gCfg.diff], slot = 46, y = gVH - 26;
+    const int actions = gTutorial ? 4 : kActionCount[gCfg.diff], slot = 46, y = gVH - 26;
     for (int a = 0; a < actions; a++) {
         const int x = cx - actions * slot / 2 + a * slot;
         const float g = gScene.glow[a];
@@ -3900,7 +4002,7 @@ static void DrawPause()
     } else if (Button(cx - 65, top + 82, 130, 20, "Restart") || Key(KEY_R)) {
         StartGame();
     } else if (Button(cx - 65, top + 108, 130, 20, "Quit to menu") || Key(KEY_Q)) {
-        gState = ST_READY;
+        gState = gTutorial ? ST_MENU : ST_READY;
     }
 }
 
@@ -3951,7 +4053,8 @@ static void DrawResults()
         Text(TextFormat("Level %d", level), left + 16, top + 178, 10, kCocoa, 0, false);
         LevelBar(left + 70, top + 180, pw - 70 - 76, (float)into / span);
         Text(TextFormat("+%d xp", gEarn.xp), left + pw - 16, top + 178, 10, kCocoaSoft, 2, false);
-        Text(TextFormat("Fish  (you have %d)", gProgress.fish), left + 16, top + 195, 10, kCocoa, 0, false);
+        Text(gEarn.lessonFish ? TextFormat("Fish  (%d for learning to play)", gEarn.lessonFish) : TextFormat("Fish  (you have %d)", gProgress.fish), left + 16, top + 195, 10,
+             kCocoa, 0, false);
         FishAmount((int)lroundf(gEarn.fish * ease), left + pw - 16, top + 195, kCocoa, true);
 
         if (gEarn.levelAfter > gEarn.levelBefore && level >= gEarn.levelAfter) {
@@ -3977,8 +4080,8 @@ static void DrawResults()
 
     if (Button(cx - 70, top + 240, 140, 24, gCfg.watch ? "Watch again" : "Walk again", 1) || Key(KEY_ENTER) || Key(KEY_R)) {
         StartGame();
-    } else if (Button(cx - 70, top + 272, 140, 18, "Back") || Key(KEY_ESCAPE)) {
-        gState = ST_READY;
+    } else if (Button(cx - 70, top + 272, 140, 18, gTutorial ? "Back to your songs" : "Back") || Key(KEY_ESCAPE)) {
+        gState = gTutorial ? ST_MENU : ST_READY;   // the lesson has no song screen
     }
 }
 
@@ -4404,7 +4507,7 @@ static void RobotThread(void* window)
         PlatformSleep(0.05);
         PlatformSendKey(window, virtualKey, false);
     };
-    while (!gRobotStop && gState != ST_READY) PlatformSleep(0.05);
+    while (!gRobotStop && gState != ST_READY && gState != ST_PLAYING) PlatformSleep(0.05);   // the lesson starts by itself
     PlatformSleep(0.8);
     // Enter on the song screen starts the walk. If something else took the keyboard for a moment, try again.
     for (int tries = 0; tries < 5 && !gRobotStop && gState == ST_READY; tries++) {
@@ -4420,6 +4523,8 @@ static void RobotThread(void* window)
     double release[4] = { 0, 0, 0, 0 };
     while (!gRobotStop && gState != ST_RESULTS) {
         if (gState != ST_PLAYING) { PlatformSleep(0.01); continue; }
+        const int back = gRobotBackTo.exchange(-1);
+        if (back >= 0) { next = (size_t)back; PlatformSleep(0.05); continue; }   // the lesson rewound
         const double now = NowSeconds(), song = now - gClockBase - gLatency;
         for (int lane = 0; lane < 4; lane++)
             if (release[lane] > 0.0 && now >= release[lane]) { PlatformSendLaneKey(window, lane, false); release[lane] = 0.0; }
@@ -4532,7 +4637,7 @@ int main(int argc, char** argv)
     double shotAt = 12.0;
     int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
     int shotFish = -1, shotXp = -1;
-    bool robotCalibrate = false;
+    bool robotCalibrate = false, robotLesson = false;
     const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
@@ -4555,6 +4660,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
         else if (!strcmp(argv[i], "--calibrate")) robotCalibrate = true;
+        else if (!strcmp(argv[i], "--lesson")) robotLesson = true;
         else if (!strcmp(argv[i], "--seq") && i + 1 < argc) seqLeft = std::max(0, atoi(argv[++i]) - 1);
         else if (!strcmp(argv[i], "--seq-step") && i + 1 < argc) seqStep = std::max(1, atoi(argv[++i]));
         else if (!strcmp(argv[i], "--sfx-dump") && i + 1 < argc) return WriteSfxFiles(argv[i + 1]) ? 0 : 1;
@@ -4614,7 +4720,12 @@ int main(int argc, char** argv)
         demo.name = "Demo track";
         demo.duration = 49.0f;
         gLibrary.push_back(demo);
-        gMenuSel = 1;
+        SongEntry guide;
+        guide.path = kTutorialKey;
+        guide.name = "How to play";
+        guide.duration = 49.0f;
+        gLibrary.insert(gLibrary.begin(), guide);
+        gMenuSel = 2;
     }
 
     if (!gSim || !gUnlockAll) CheckEquipped();
@@ -4642,15 +4753,16 @@ int main(int argc, char** argv)
             if (gCal.phase == 2) { gCal.enough = true; gCal.median = 0.062f; gCal.spread = 0.012f; gCal.suggest = 60; }
         }
         else if (shotView != "menu") {
+            gWantTutorial = shotView == "tutorial";
             BeginLoad(songPath, songPath.empty());
             FinishLoad();
-            if (gState != ST_READY) printf("load failed: %s\n", gError.c_str());
-            else if (shotView != "ready") StartGame();
+            if (gState != ST_READY && gState != ST_PLAYING) printf("load failed: %s\n", gError.c_str());
+            else if (gState == ST_READY && shotView != "ready") StartGame();
         }
     } else if (robotLog) {
         if (gLog) fprintf(gLog, "window in front: %s\n", PlatformFocusWindow(GetWindowHandle()) ? "yes" : "NO");
         if (robotCalibrate) gState = ST_CALIBRATE;
-        else if (songPath.empty()) BeginLoad("", true);
+        else if (songPath.empty()) { gWantTutorial = robotLesson; BeginLoad("", true); }
         else BeginLoad(songPath, false);
     } else if (!songPath.empty()) {
         BeginLoad(songPath, false);
@@ -4763,6 +4875,8 @@ int main(int argc, char** argv)
                 fprintf(gLog, "\npaid: %d fish and %d xp for the walk, %d fish for levels reached (level %d -> %d)", gEarn.fish, gEarn.xp, gEarn.levelFish,
                         gEarn.levelBefore, gEarn.levelAfter);
                 fprintf(gLog, "\nnow: level %d, %d xp, %d fish", LevelOf(gProgress.xp), gProgress.xp, gProgress.fish);
+                if (gTutorial) fprintf(gLog, "\nlesson: parts repeated %d %d %d %d %d times; first-time thank-you %d fish; finished flag %d", gTutorialTries[0], gTutorialTries[1],
+                                       gTutorialTries[2], gTutorialTries[3], gTutorialTries[4], gEarn.lessonFish, gProgress.guided);
                 fprintf(gLog, "\nprogress now: %d song(s), %d purrfect, best streak %d, best rank %d, places mask %d\n", gProgress.songs, gProgress.perfects,
                         gProgress.bestStreak, gProgress.bestRank, gProgress.places);
                 if (const SongEntry* e = FindSong(gSongPath)) fprintf(gLog, "library: \"%s\" best on difficulty %d: %.4f, score %d\n", e->name.c_str(), gCfg.diff, e->best[gCfg.diff], e->score[gCfg.diff]);
@@ -4789,7 +4903,7 @@ int main(int argc, char** argv)
         if (gSim) {
             shotFrames++;
             if (shotHold < 0) {
-                const bool timed = shotView == "play" || shotView == "pause" || shotView == "results";
+                const bool timed = shotView == "play" || shotView == "pause" || shotView == "results" || shotView == "tutorial";
                 if (gState == ST_MENU || gState == ST_WARDROBE || gState == ST_SETTINGS || gState == ST_CALIBRATE || gState == ST_HOME || !timed ? shotFrames >= 180 : gSimTime >= shotAt) {
                     if (shotView == "pause") { gPausedAt = t; gState = ST_PAUSED; shotHold = 40; }
                     else if (shotView == "results") { FinishGame(); shotHold = 90; }
