@@ -1,0 +1,18 @@
+# Salida de compilación
+/build/
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# Dependencias descargadas (ver scripts/fetch_raylib.ps1)
+/third_party/
+
+# Configuración local del juego y capturas de prueba
+oniria.cfg
+/shots/
+
+# Editor
+.vs/
+.vscode/
+.claude/
