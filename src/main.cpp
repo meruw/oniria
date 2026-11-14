@@ -1564,6 +1564,8 @@ struct Progress {
     float minutes = 0.0f;
     int fish = 0, xp = 0;
     int guided = 0;          // 1 once the guided walk has been finished
+    unsigned homeOwned = 0;  // bit per piece of furniture bought
+    int home[7] = { 0, 0, 0, 0, 0, 0, 0 };   // what is placed in each spot of the cat's room
     unsigned owned = 0;      // bit per item bought
     unsigned known = 0;      // bit per item already seen unlocked in the wardrobe
 };
@@ -1775,6 +1777,8 @@ static void LoadProgress()
         else if (!strcmp(key, "xp")) gProgress.xp = std::max(0, (int)v);
         else if (!strcmp(key, "owned")) gProgress.owned = (unsigned)v;
         else if (!strcmp(key, "guided")) gProgress.guided = (int)v;
+        else if (!strcmp(key, "home_owned")) gProgress.homeOwned = (unsigned)v;
+        else if (!strcmp(key, "home_set")) { for (int i = 0; i < 7; i++) gProgress.home[i] = ((int)v >> (2 * i)) & 3; }
         else if (!strcmp(key, "day")) gDaily.day = (int)v;
         else if (!strcmp(key, "day_walks")) gDaily.walks = (int)v;
         else if (!strcmp(key, "day_perfects")) gDaily.perfects = (int)v;
@@ -1797,6 +1801,9 @@ static void SaveProgress()
     fprintf(f, "songs=%d\nperfects=%d\nstreak=%d\nrank=%d\nfull=%d\nplaces=%d\nminutes=%.2f\nfish=%d\nxp=%d\nowned=%u\nknown=%u\nguided=%d\n",
             gProgress.songs, gProgress.perfects, gProgress.bestStreak, gProgress.bestRank, gProgress.fullCombos,
             gProgress.places, gProgress.minutes, gProgress.fish, gProgress.xp, gProgress.owned, gProgress.known, gProgress.guided);
+    int homeSet = 0;
+    for (int i = 0; i < 7; i++) homeSet |= (gProgress.home[i] & 3) << (2 * i);
+    fprintf(f, "home_owned=%u\nhome_set=%d\n", gProgress.homeOwned, homeSet);
     fprintf(f, "day=%d\nday_walks=%d\nday_perfects=%d\nday_streak=%d\nday_rank=%d\nday_places=%d\nday_minutes=%.2f\nday_accuracy=%.4f\nday_done=%d\n",
             gDaily.day, gDaily.walks, gDaily.perfects, gDaily.streak, gDaily.rank, gDaily.places, gDaily.minutes, gDaily.accuracy, gDaily.done);
     fclose(f);
@@ -1810,6 +1817,34 @@ static bool Buy(int index)
     gProgress.fish -= it.amount;
     gProgress.owned |= 1u << index;
     gProgress.known |= 1u << index;
+    SaveProgress();
+    return true;
+}
+
+// ---- The cat's room ----
+// Seven spots, four choices for each; the first of each is free. Everything
+// else is bought with fish, which gives them somewhere to go once the
+// wardrobe is full.
+
+enum HomeSlot { HOME_WALL, HOME_RUG, HOME_BED, HOME_PLANT, HOME_LAMP, HOME_TOY, HOME_ART, HOME_SLOTS };
+struct Decor { const char* name; int price; };
+static const Decor kDecor[HOME_SLOTS][4] = {
+    { { "Cream walls", 0 },   { "Mint walls", 120 },    { "Rose walls", 120 },      { "Night-blue walls", 200 } },
+    { { "Bare floor", 0 },    { "Round rug", 90 },      { "Striped rug", 140 },     { "Star rug", 220 } },
+    { { "Cardboard box", 0 }, { "Cushion", 120 },       { "Basket bed", 220 },      { "Canopy bed", 450 } },
+    { { "No plant", 0 },      { "Little cactus", 70 },  { "Potted fern", 130 },     { "Tall monstera", 260 } },
+    { { "No lamp", 0 },       { "Floor lamp", 150 },    { "Paper lantern", 200 },   { "String lights", 320 } },
+    { { "No toys", 0 },       { "Yarn basket", 80 },    { "Scratching post", 180 }, { "Cat tree", 500 } },
+    { { "Bare wall", 0 },     { "Fish picture", 100 },  { "Bookshelf", 240 },       { "Cuckoo clock", 300 } },
+};
+
+static bool DecorOwned(int slot, int n) { return n == 0 || gUnlockAll || ((gProgress.homeOwned >> (slot * 4 + n)) & 1); }
+
+static bool BuyDecor(int slot, int n)
+{
+    if (DecorOwned(slot, n) || gProgress.fish < kDecor[slot][n].price) return false;
+    gProgress.fish -= kDecor[slot][n].price;
+    gProgress.homeOwned |= 1u << (slot * 4 + n);
     SaveProgress();
     return true;
 }
@@ -1848,8 +1883,11 @@ static void ShowEquipped() { ShowCat(gCfg.cat, gCfg.hat, gCfg.neck, gCfg.back); 
 
 // Height of the path at world x. During a song the hills are the song's
 // loudness: quiet passages are valleys, loud ones are hilltops.
+static bool gIndoors = false;   // set while the cat's room is drawn: the floor there is level
+
 static float PathHeight(float x)
 {
+    if (gIndoors) return 0.0f;
     if (!PathFollowsSong() || gPathHeights.empty())
         return 0.55f + 0.35f * sinf(x * 0.11f) + 0.15f * sinf(x * 0.27f + 1.0f);
     const float f = x / gScroll / 0.5f;
@@ -3591,6 +3629,245 @@ static void RenderWorld(double t)
 }
 
 // ---------------------------------------------------------------------------
+// The cat's room
+// ---------------------------------------------------------------------------
+// A little diorama: a wooden floor, three walls and a window that shows the
+// sky outside, with the furniture the player has chosen. It is rebuilt only
+// when a choice changes.
+
+static Shape sHome, sHomeGlow, sHomeSky;
+static int gHomeShown[HOME_SLOTS] = { -1, -1, -1, -1, -1, -1, -1 };
+
+static void BuildHome(const int* want)
+{
+    sHome.clear(); sHomeGlow.clear(); sHomeSky.clear();
+    memcpy(gHomeShown, want, sizeof(gHomeShown));
+    static const Vector3 kWalls[4] = { { 0.98f, 0.925f, 0.84f }, { 0.78f, 0.91f, 0.83f }, { 0.97f, 0.83f, 0.855f }, { 0.41f, 0.44f, 0.63f } };
+    const Vector3 wall = kWalls[want[HOME_WALL]], trim = Rgb(255, 250, 240), woodA = Rgb(222, 178, 128), woodB = Rgb(210, 164, 114), wood = Rgb(170, 120, 84);
+    const Vector3 coral = Rgb(240, 128, 144), cream = Rgb(252, 240, 222), leaf = Rgb(104, 176, 110), leafDark = Rgb(78, 148, 96), pot = Rgb(206, 124, 92);
+    const Vector3 warm = Rgb(255, 232, 170);
+    const float W = 2.5f, zBack = -2.2f, zFront = 1.6f, H = 3.4f;
+
+    for (int i = 0; i < 8; i++) AddBox(sHome, { 0, -0.1f, zBack + 0.2375f + i * 0.475f }, { W, 0.1f, 0.2375f }, (i & 1) ? woodA : woodB);   // floorboards
+    AddBox(sHome, { 0, H / 2 - 0.1f, zBack - 0.1f }, { W + 0.2f, H / 2 + 0.1f, 0.1f }, wall);
+    for (int side = -1; side <= 1; side += 2)
+        AddBox(sHome, { side * (W + 0.1f), H / 2 - 0.1f, (zBack + zFront) / 2 }, { 0.1f, H / 2 + 0.1f, (zFront - zBack) / 2 }, Vector3Scale(wall, 0.93f));
+    AddBox(sHome, { 0, 0.11f, zBack + 0.03f }, { W, 0.11f, 0.03f }, trim);   // skirting board
+
+    // The window, with the real sky behind the glass.
+    const float wx = 1.05f, wy = 2.05f;
+    AddBox(sHome, { wx, wy, zBack + 0.03f }, { 0.74f, 0.64f, 0.03f }, trim);
+    AddBox(sHomeSky, { wx, wy, zBack + 0.07f }, { 0.64f, 0.54f, 0.01f }, { 1, 1, 1 });
+    AddBox(sHome, { wx, wy, zBack + 0.095f }, { 0.03f, 0.54f, 0.01f }, trim);
+    AddBox(sHome, { wx, wy, zBack + 0.095f }, { 0.64f, 0.03f, 0.01f }, trim);
+    AddBox(sHome, { wx, wy - 0.68f, zBack + 0.12f }, { 0.82f, 0.04f, 0.12f }, trim);
+
+    const Vector3 rugAt = { -0.15f, 0.0f, 0.15f };
+    switch (want[HOME_RUG]) {
+        case 1:
+            AddCylinder(sHome, rugAt, 1.25f, 0.03f, 14, Rgb(248, 196, 150), Rgb(248, 196, 150));
+            AddCylinder(sHome, rugAt, 0.9f, 0.05f, 14, cream, cream);
+            AddCylinder(sHome, rugAt, 0.5f, 0.07f, 12, coral, coral);
+            break;
+        case 2:
+            for (int i = 0; i < 7; i++) AddBox(sHome, { rugAt.x, 0.02f, rugAt.z - 0.78f + i * 0.26f }, { 1.4f, 0.02f, 0.13f }, (i & 1) ? cream : Rgb(120, 190, 200));
+            break;
+        case 3:
+            AddCylinder(sHome, rugAt, 1.25f, 0.03f, 14, Rgb(70, 80, 130), Rgb(70, 80, 130));
+            for (int i = 0; i < 5; i++) {
+                const float a = 2 * kPi * i / 5 + 0.3f;
+                AddBlob(sHome, { rugAt.x + cosf(a) * 0.8f, 0.05f, rugAt.z + sinf(a) * 0.8f }, { 0.14f, 0.02f, 0.14f }, warm);
+            }
+            AddBlob(sHome, { rugAt.x, 0.05f, rugAt.z }, { 0.3f, 0.02f, 0.3f }, warm);
+            break;
+    }
+
+    const Vector3 bedAt = { -1.7f, 0.0f, -1.35f };
+    switch (want[HOME_BED]) {
+        case 0: {   // the box every cat prefers anyway
+            const Vector3 card = Rgb(206, 166, 116);
+            AddBox(sHome, { bedAt.x, 0.24f, bedAt.z }, { 0.58f, 0.24f, 0.45f }, card);
+            AddBox(sHome, { bedAt.x, 0.485f, bedAt.z }, { 0.5f, 0.01f, 0.37f }, Rgb(120, 90, 66));
+            AddBox(sHome, { bedAt.x - 0.72f, 0.5f, bedAt.z }, { 0.16f, 0.015f, 0.43f }, card);
+            AddBox(sHome, { bedAt.x + 0.72f, 0.52f, bedAt.z }, { 0.16f, 0.015f, 0.43f }, card);
+            break;
+        }
+        case 1:
+            AddBlob(sHome, { bedAt.x, 0.15f, bedAt.z }, { 0.72f, 0.17f, 0.56f }, coral);
+            AddBlob(sHome, { bedAt.x, 0.24f, bedAt.z }, { 0.45f, 0.1f, 0.35f }, Rgb(250, 170, 180));
+            break;
+        case 2:
+            AddCylinder(sHome, bedAt, 0.72f, 0.32f, 10, Rgb(196, 148, 96), Rgb(150, 108, 70));
+            AddBlob(sHome, { bedAt.x, 0.33f, bedAt.z }, { 0.58f, 0.1f, 0.58f }, cream);
+            break;
+        case 3: {
+            AddBox(sHome, { bedAt.x, 0.14f, bedAt.z }, { 0.74f, 0.14f, 0.58f }, wood);
+            AddBlob(sHome, { bedAt.x, 0.32f, bedAt.z }, { 0.66f, 0.1f, 0.5f }, Rgb(250, 190, 200));
+            for (int i = 0; i < 4; i++) {
+                const Vector3 foot = { bedAt.x + ((i & 1) ? 0.68f : -0.68f), 0.0f, bedAt.z + ((i & 2) ? 0.52f : -0.52f) };
+                AddBeam(sHome, foot, { foot.x, 1.55f, foot.z }, 0.035f, wood);
+            }
+            AddCone(sHome, { bedAt.x, 1.5f, bedAt.z }, 1.05f, 0.5f, 4, Rgb(246, 170, 190), kPi / 4);
+            AddBlob(sHome, { bedAt.x, 2.02f, bedAt.z }, { 0.07f, 0.07f, 0.07f }, warm);
+            break;
+        }
+    }
+
+    const Vector3 plantAt = { 1.95f, 0.0f, -1.6f };
+    switch (want[HOME_PLANT]) {
+        case 1:
+            AddCylinder(sHome, plantAt, 0.2f, 0.26f, 8, pot, Rgb(110, 80, 60));
+            AddBlob(sHome, { plantAt.x, 0.56f, plantAt.z }, { 0.15f, 0.32f, 0.15f }, leaf);
+            AddBlob(sHome, { plantAt.x + 0.17f, 0.56f, plantAt.z }, { 0.08f, 0.14f, 0.08f }, leafDark);
+            AddBlob(sHome, { plantAt.x, 0.9f, plantAt.z }, { 0.06f, 0.05f, 0.06f }, coral);
+            break;
+        case 2:
+            AddCylinder(sHome, plantAt, 0.28f, 0.36f, 8, pot, Rgb(110, 80, 60));
+            for (int i = 0; i < 9; i++) {
+                const float a = 2 * kPi * i / 9, out = 0.5f + 0.12f * (i % 3);
+                AddBeam(sHome, { plantAt.x, 0.36f, plantAt.z }, { plantAt.x + cosf(a) * out, 0.78f + 0.14f * (i % 2), plantAt.z + sinf(a) * out * 0.8f }, 0.045f, (i & 1) ? leaf : leafDark);
+            }
+            break;
+        case 3:
+            AddCylinder(sHome, plantAt, 0.34f, 0.46f, 8, cream, Rgb(110, 80, 60));
+            for (int i = 0; i < 6; i++) {
+                const float a = 2 * kPi * i / 6 + 0.4f, out = 0.42f + 0.1f * (i % 2), up = 1.0f + 0.22f * i;
+                const Vector3 tip = { plantAt.x + cosf(a) * out, up, plantAt.z + sinf(a) * out * 0.7f };
+                AddBeam(sHome, { plantAt.x, 0.46f, plantAt.z }, tip, 0.025f, leafDark);
+                AddBlob(sHome, tip, { 0.3f, 0.05f, 0.24f }, (i & 1) ? leaf : leafDark);
+            }
+            break;
+    }
+
+    switch (want[HOME_LAMP]) {
+        case 1: {
+            const Vector3 at = { -0.75f, 0.0f, -1.85f };
+            AddCylinder(sHome, at, 0.22f, 0.05f, 8, wood, wood);
+            AddBeam(sHome, at, { at.x, 1.75f, at.z }, 0.03f, wood);
+            AddCone(sHomeGlow, { at.x, 1.65f, at.z }, 0.38f, 0.45f, 8, warm);
+            break;
+        }
+        case 2: {
+            const Vector3 at = { -0.5f, 2.55f, -1.2f };
+            AddBeam(sHome, { at.x, H, at.z }, { at.x, at.y + 0.4f, at.z }, 0.012f, wood);
+            AddBlob(sHomeGlow, at, { 0.36f, 0.42f, 0.36f }, Rgb(255, 240, 200));
+            AddCylinder(sHome, { at.x, at.y + 0.38f, at.z }, 0.14f, 0.05f, 8, coral, coral);
+            AddCylinder(sHome, { at.x, at.y - 0.44f, at.z }, 0.14f, 0.05f, 8, coral, coral);
+            break;
+        }
+        case 3: {
+            static const Vector3 kBulbs[4] = { { 1.0f, 0.86f, 0.5f }, { 1.0f, 0.62f, 0.68f }, { 0.6f, 0.86f, 1.0f }, { 0.7f, 1.0f, 0.72f } };
+            Vector3 last = { -W, 3.05f, zBack + 0.12f };
+            for (int i = 1; i <= 12; i++) {
+                const float u = i / 12.0f;
+                const Vector3 at = { -W + 2 * W * u, 3.05f - 0.22f * sinf(kPi * fmodf(u * 3.0f, 1.0f)), zBack + 0.12f };
+                AddBeam(sHome, last, at, 0.008f, Rgb(90, 70, 70));
+                if (i < 12) AddBlob(sHomeGlow, { at.x, at.y - 0.06f, at.z }, { 0.06f, 0.075f, 0.06f }, kBulbs[i & 3]);
+                last = at;
+            }
+            break;
+        }
+    }
+
+    const Vector3 toyAt = { 1.8f, 0.0f, 0.55f };
+    switch (want[HOME_TOY]) {
+        case 1:
+            AddCylinder(sHome, toyAt, 0.36f, 0.28f, 10, Rgb(196, 148, 96), Rgb(150, 108, 70));
+            AddBlob(sHome, { toyAt.x - 0.12f, 0.36f, toyAt.z }, { 0.17f, 0.17f, 0.17f }, coral);
+            AddBlob(sHome, { toyAt.x + 0.14f, 0.34f, toyAt.z + 0.06f }, { 0.15f, 0.15f, 0.15f }, Rgb(120, 190, 200));
+            AddBlob(sHome, { toyAt.x - 0.62f, 0.13f, toyAt.z + 0.3f }, { 0.13f, 0.13f, 0.13f }, warm);
+            break;
+        case 2:
+            AddBox(sHome, { toyAt.x, 0.04f, toyAt.z }, { 0.42f, 0.04f, 0.42f }, wood);
+            AddCylinder(sHome, toyAt, 0.13f, 1.15f, 8, Rgb(226, 200, 160), Rgb(226, 200, 160));
+            AddBox(sHome, { toyAt.x, 1.18f, toyAt.z }, { 0.3f, 0.04f, 0.3f }, coral);
+            AddBeam(sHome, { toyAt.x + 0.28f, 1.16f, toyAt.z }, { toyAt.x + 0.34f, 0.8f, toyAt.z }, 0.01f, wood);
+            AddBlob(sHome, { toyAt.x + 0.34f, 0.74f, toyAt.z }, { 0.08f, 0.08f, 0.08f }, warm);
+            break;
+        case 3:
+            AddBox(sHome, { toyAt.x, 0.04f, toyAt.z }, { 0.6f, 0.04f, 0.48f }, wood);
+            AddCylinder(sHome, { toyAt.x - 0.3f, 0, toyAt.z }, 0.11f, 1.0f, 8, Rgb(226, 200, 160), Rgb(226, 200, 160));
+            AddCylinder(sHome, { toyAt.x + 0.3f, 0, toyAt.z }, 0.11f, 1.9f, 8, Rgb(226, 200, 160), Rgb(226, 200, 160));
+            AddBox(sHome, { toyAt.x - 0.3f, 1.03f, toyAt.z }, { 0.36f, 0.04f, 0.36f }, Rgb(120, 190, 200));
+            AddBox(sHome, { toyAt.x + 0.3f, 2.1f, toyAt.z }, { 0.36f, 0.24f, 0.34f }, coral);
+            AddBlob(sHome, { toyAt.x + 0.3f, 2.08f, toyAt.z + 0.33f }, { 0.17f, 0.17f, 0.03f }, Rgb(96, 60, 76));
+            AddBeam(sHome, { toyAt.x - 0.62f, 1.0f, toyAt.z }, { toyAt.x - 0.68f, 0.66f, toyAt.z }, 0.01f, wood);
+            AddBlob(sHome, { toyAt.x - 0.68f, 0.6f, toyAt.z }, { 0.08f, 0.08f, 0.08f }, warm);
+            break;
+    }
+
+    const Vector3 artAt = { -1.05f, 2.1f, zBack + 0.03f };
+    switch (want[HOME_ART]) {
+        case 1: {
+            AddBox(sHome, artAt, { 0.5f, 0.38f, 0.03f }, wood);
+            AddBox(sHome, { artAt.x, artAt.y, artAt.z + 0.035f }, { 0.43f, 0.31f, 0.01f }, Rgb(214, 238, 244));
+            AddBlob(sHome, { artAt.x + 0.06f, artAt.y, artAt.z + 0.06f }, { 0.2f, 0.12f, 0.015f }, Rgb(96, 170, 214));
+            const Vector3 a = { artAt.x - 0.1f, artAt.y, artAt.z + 0.07f }, b = { artAt.x - 0.3f, artAt.y + 0.13f, artAt.z + 0.07f }, c = { artAt.x - 0.3f, artAt.y - 0.13f, artAt.z + 0.07f };
+            sHome.push_back({ a, c, b, Rgb(96, 170, 214) });
+            sHome.push_back({ a, b, c, Rgb(96, 170, 214) });
+            break;
+        }
+        case 2: {
+            static const Vector3 kBooks[5] = { { 0.94f, 0.5f, 0.56f }, { 0.47f, 0.74f, 0.78f }, { 1.0f, 0.86f, 0.5f }, { 0.55f, 0.5f, 0.75f }, { 0.5f, 0.76f, 0.55f } };
+            for (int row = 0; row < 2; row++) {
+                const float y = artAt.y - 0.35f + row * 0.55f;
+                AddBox(sHome, { artAt.x, y, artAt.z + 0.14f }, { 0.62f, 0.03f, 0.16f }, wood);
+                for (int i = 0; i < 6 - row * 2; i++) {
+                    const float h = 0.16f + 0.05f * ((i + row) % 3);
+                    AddBox(sHome, { artAt.x - 0.5f + i * 0.15f, y + 0.03f + h, artAt.z + 0.14f }, { 0.06f, h, 0.11f }, kBooks[(i + row * 2) % 5]);
+                }
+            }
+            AddCylinder(sHome, { artAt.x + 0.4f, artAt.y + 0.23f, artAt.z + 0.14f }, 0.08f, 0.1f, 6, pot, pot);
+            AddBlob(sHome, { artAt.x + 0.4f, artAt.y + 0.42f, artAt.z + 0.14f }, { 0.12f, 0.12f, 0.1f }, leaf);
+            break;
+        }
+        case 3:
+            AddBox(sHome, artAt, { 0.3f, 0.34f, 0.1f }, wood);
+            AddCone(sHome, { artAt.x, artAt.y + 0.34f, artAt.z + 0.02f }, 0.46f, 0.32f, 4, Rgb(206, 110, 110), kPi / 4);
+            AddBlob(sHome, { artAt.x, artAt.y + 0.02f, artAt.z + 0.11f }, { 0.19f, 0.19f, 0.02f }, cream);
+            AddBeam(sHome, { artAt.x, artAt.y + 0.02f, artAt.z + 0.14f }, { artAt.x + 0.08f, artAt.y + 0.1f, artAt.z + 0.14f }, 0.012f, Rgb(70, 50, 60));
+            AddBeam(sHome, { artAt.x, artAt.y - 0.34f, artAt.z + 0.05f }, { artAt.x + 0.05f, artAt.y - 0.75f, artAt.z + 0.05f }, 0.012f, wood);
+            AddBlob(sHome, { artAt.x + 0.05f, artAt.y - 0.8f, artAt.z + 0.05f }, { 0.07f, 0.07f, 0.03f }, warm);
+            break;
+    }
+}
+
+static void RenderHome()
+{
+    gPalette = PaletteAt(gScene.day);
+    gHaloCount = 0;
+    const bool lamp = gHomeShown[HOME_LAMP] > 0;
+    const bool side = gVW >= 560;   // the panel sits on the right, so the room is framed on the left
+    gCamera.position = Vector3{ side ? 2.75f : 0.0f, 3.0f, side ? 10.3f : 11.5f };
+    gCamera.target = Vector3{ gCamera.position.x, 1.45f, -0.4f };
+    gCamera.up = Vector3{ 0, 1, 0 };
+    gCamera.fovy = 34.0f;
+    gCamera.projection = CAMERA_PERSPECTIVE;
+    gLight.camera = gCamera.position;
+    gLight.lightDir = Vector3Normalize(Vector3{ 0.35f, 0.75f, 0.55f });
+    gLight.sun = Vector3{ 1.0f, 0.93f, 0.82f };
+    gLight.ambient = lamp ? Vector3{ 0.7f, 0.64f, 0.6f } : Vector3{ 0.62f, 0.58f, 0.6f };
+    gLight.saturation = 1.05f;
+    gLight.fog = Vector3{ 0, 0, 0 };
+    gLight.fogStart = 1000.0f;
+    gLight.fogEnd = 2000.0f;
+
+    ClearBackground(BLACK);   // also clears the depth buffer
+    DrawRectangleGradientV(0, 0, gVW, gVH, Color{ 96, 70, 86, 255 }, Color{ 60, 44, 60, 255 });
+    BeginMode3D(gCamera);
+    rlBegin(RL_TRIANGLES);
+    const Matrix none = MatrixIdentity();
+    DrawShape(sHome, none);
+    DrawShape(sHomeGlow, none, Vector3{ 1, 1, 1 }, 1.0f);
+    DrawShape(sHomeSky, none, Mix(gPalette.skyBottom, gPalette.skyTop, 0.5f), 1.0f);
+    gIndoors = true;
+    DrawCat(-0.15f, false);
+    gIndoors = false;
+    rlEnd();
+    EndMode3D();
+}
+
+// ---------------------------------------------------------------------------
 // UI (drawn on the low-resolution canvas with raylib's built-in pixel font)
 // ---------------------------------------------------------------------------
 // Two looks: light text with a shadow for things that sit directly on the
@@ -3776,6 +4053,7 @@ static void PickSong(int index)
 
 static State gSettingsFrom = ST_MENU;   // where the settings screen returns to
 static int   gWardrobeTab = SLOT_HAT, gWardrobeSel = -1, gSettingsTab = 0;
+static int   gHomeTab = HOME_RUG, gHomeSel = -1;
 static float gResetArmedUntil = -1.0f;
 
 static void OpenSettings()
@@ -3808,15 +4086,15 @@ static void DrawMenu()
 
     {   // Today's goals.
         EnsureToday();
-        const int w = 232, x = leftCx - w / 2, y = 56 + titleSize + (gError.empty() ? 0 : 22);
-        Card(x, y, w, 58, Fade(kPaper, 0.93f), kLine);
+        const int w = 232, x = leftCx - w / 2, y = 53 + titleSize + (gError.empty() ? 0 : 22);
+        Card(x, y, w, 54, Fade(kPaper, 0.93f), kLine);
         Text("Today", x + 8, y + 4, 10, kCocoaSoft, 0, false);
         if ((gDaily.done & 8) != 0) Text("all done, see you tomorrow", x + w - 8, y + 4, 10, kCocoaSoft, 2, false);
         else { Text("all three:", x + w - 44, y + 4, 10, kCocoaSoft, 2, false); FishAmount(kGoalBonus, x + w - 6, y + 4, kCocoaSoft, true); }
         for (int i = 0; i < 3; i++) {
             const Goal& g = gGoals[i];
             const bool done = (gDaily.done >> i) & 1;
-            const int ly = y + 17 + i * 13;
+            const int ly = y + 16 + i * 12;
             if (done) Paw2((float)x + 11, (float)ly + 5, 4.0f, kCoral);
             else Poly2((float)x + 11, (float)ly + 5, 2.5f, 2.5f, 8, 0, Fade(kLine, 0.9f));
             Text(GoalText(g), x + 20, ly, 10, done ? kCocoaSoft : kCocoa, 0, false);
@@ -3835,12 +4113,13 @@ static void DrawMenu()
         LevelBar(x + 62, y + 6, 66, (float)into / span);
         FishAmount(gProgress.fish, x + w - 6, y + 4, kCocoa);
     }
-    if (Button(leftCx - 100, by0, 96, 22, "Wardrobe") || Key(KEY_C)) { gState = ST_WARDROBE; gWardrobeSel = -1; }
+    if (Button(leftCx - 100, by0, 64, 22, "Wardrobe") || Key(KEY_C)) { gState = ST_WARDROBE; gWardrobeSel = -1; }
     if (HasNewItems()) {   // something new is waiting in there
-        Poly2((float)leftCx - 8, (float)by0 + 1, 4.5f, 4.5f, 8, 0, kCoralLine);
-        Poly2((float)leftCx - 8, (float)by0 + 1, 3.5f, 3.5f, 8, 0, kCoral);
+        Poly2((float)leftCx - 38, (float)by0 + 1, 4.5f, 4.5f, 8, 0, kCoralLine);
+        Poly2((float)leftCx - 38, (float)by0 + 1, 3.5f, 3.5f, 8, 0, kCoral);
     }
-    if (Button(leftCx + 4, by0, 96, 22, "Settings") || Key(KEY_S)) OpenSettings();
+    if (Button(leftCx - 32, by0, 64, 22, "Home") || Key(KEY_H)) { gState = ST_HOME; gHomeSel = -1; }
+    if (Button(leftCx + 36, by0, 64, 22, "Settings") || Key(KEY_S)) OpenSettings();
     Text(TextFormat("now passing: %s, %s", kBiomeName[BiomeNear(gScene.worldX)], kVariantName[BiomeNear(gScene.worldX)][VariantNear(gScene.worldX)]), leftCx, gVH - 30, 10, kInk);
     Text("Esc pauses  -  F11 fullscreen", leftCx, gVH - 16, 10, kSoft);
     if (gState != ST_MENU) return;
@@ -4339,6 +4618,83 @@ static void DrawWardrobe()
     }
 }
 
+// The cat's room: pick what goes in each spot. Works like the wardrobe: what is
+// not owned shows its price, and selecting it puts it in the room to look at.
+static void DrawHome()
+{
+    int left, top;
+    const int pw = 300, ph = 240;
+    Panel(pw, ph, left, top, true);
+    const int x0 = left + 12, inner = pw - 24;
+
+    Paw2((float)left + 19, (float)top + 20, 6, kCoral);
+    Text("Home", left + 32, top + 9, 20, kCocoa, 0, false);
+    FishAmount(gProgress.fish, left + pw - 14, top + 14, kCocoa);
+
+    static const char* kTabs[HOME_SLOTS] = { "Walls", "Rug", "Bed", "Plant", "Lamp", "Toys", "Art" };
+    const int tw = (inner - 9) / 4;
+    for (int i = 0; i < HOME_SLOTS; i++)
+        if (Button(x0 + (i % 4) * (tw + 3), top + 36 + (i / 4) * 23, tw, 20, kTabs[i], gHomeTab == i ? 2 : 0)) { gHomeTab = i; gHomeSel = -1; }
+    if (Key(KEY_RIGHT)) { gHomeTab = (gHomeTab + 1) % HOME_SLOTS; gHomeSel = -1; }
+    if (Key(KEY_LEFT)) { gHomeTab = (gHomeTab + HOME_SLOTS - 1) % HOME_SLOTS; gHomeSel = -1; }
+
+    const int rowH = 19, listY = top + 88, placed = gProgress.home[gHomeTab];
+    if (gHomeSel < 0 || gHomeSel > 3) gHomeSel = placed;
+    if (Key(KEY_DOWN)) gHomeSel = std::min(3, gHomeSel + 1);
+    if (Key(KEY_UP)) gHomeSel = std::max(0, gHomeSel - 1);
+
+    int pick = Key(KEY_ENTER) || Key(KEY_SPACE) ? gHomeSel : -1;
+    for (int n = 0; n < 4; n++) {
+        const Decor& d = kDecor[gHomeTab][n];
+        const int y = listY + n * rowH;
+        const bool owned = DecorOwned(gHomeTab, n), here = placed == n;
+        const bool hot = CheckCollisionPointRec(Mouse(), Rectangle{ (float)x0, (float)y, (float)inner, (float)(rowH - 2) });
+        if (here) Card(x0, y, inner, rowH - 2, kPeach, kPeachLine, false);
+        else if (hot || n == gHomeSel) Card(x0, y, inner, rowH - 2, kPaperDeep, n == gHomeSel ? kPeachLine : kLine, false);
+        if (here) Paw2((float)x0 + 10, (float)y + 9, 4.5f, kCoral);
+        else if (owned) Poly2((float)x0 + 10, (float)y + 8, 3.0f, 3.0f, 8, 0, Fade(kLine, 0.9f));
+        else Lock2(x0 + 7, y + 3, kCocoaSoft);
+        Text(d.name, x0 + 22, y + 4, 10, owned ? kCocoa : kCocoaSoft, 0, false);
+        if (!owned) FishAmount(d.price, x0 + inner - 6, y + 4, gProgress.fish >= d.price ? kCocoa : kCocoaSoft);
+        if (hot && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && gState == gFrameState) {
+            gHomeSel = n;
+            if (owned) pick = n;
+            else PlaySfx(SFX_CLICK, 3.0f);
+        }
+    }
+
+    const Decor& sel = kDecor[gHomeTab][gHomeSel];
+    const bool locked = !DecorOwned(gHomeTab, gHomeSel);
+    bool buy = false;
+    if (locked && gProgress.fish >= sel.price) {
+        buy = Button(x0, top + ph - 30, 150, 22, TextFormat("Buy for %d fish", sel.price), 1) || pick == gHomeSel;
+    } else if (locked) {
+        Text("having a look", x0, top + ph - 34, 10, kCocoaSoft, 0, false);
+        Text(TextFormat("%d more fish to go", sel.price - gProgress.fish), x0, top + ph - 21, 10, kCocoa, 0, false);
+        if (pick == gHomeSel) PlaySfx(SFX_MISS, 0.0f, 0.7f);
+    }
+    if (buy && BuyDecor(gHomeTab, gHomeSel)) {
+        gProgress.home[gHomeTab] = gHomeSel;
+        PlaySfx(SFX_MILESTONE, 0.0f, 0.7f);
+        CatDo(ACT_HOP);
+    } else if (pick >= 0 && !locked && placed != pick) {
+        gProgress.home[gHomeTab] = pick;
+        PlaySfx(SFX_TWINKLE, 0.0f, 0.8f);
+        CatDo(ACT_HOP);
+    }
+
+    // The room shows what is placed, except that a selected thing that is not owned is shown in its spot.
+    int want[HOME_SLOTS];
+    memcpy(want, gProgress.home, sizeof(want));
+    if (!DecorOwned(gHomeTab, gHomeSel)) want[gHomeTab] = gHomeSel;
+    if (memcmp(want, gHomeShown, sizeof(want)) != 0) BuildHome(want);
+
+    if (Button(left + pw - 14 - 90, top + ph - 30, 90, 22, "Done", 1) || Key(KEY_ESCAPE)) {
+        SaveProgress();
+        gState = ST_MENU;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Audio calibration
 // ---------------------------------------------------------------------------
@@ -4553,6 +4909,7 @@ static void DrawSettings()
             if (Button(x0, y, 170, 20, armed ? "Click again to erase it all" : "Reset progress", armed ? 2 : 0)) {
                 if (armed) {   // forgets fish, level, everything bought and the lifetime numbers; songs and their best ranks stay
                     gProgress = Progress();
+                    gHomeShown[0] = -1;
                     gResetArmedUntil = -1.0f;
                     CheckEquipped();
                     ShowEquipped();
@@ -4573,7 +4930,12 @@ static void DrawSettings()
 
 static void DrawFrame(double t)
 {
-    RenderWorld(t);
+    if (gState == ST_HOME) {
+        if (gHomeShown[0] < 0) BuildHome(gProgress.home);
+        RenderHome();
+    } else {
+        RenderWorld(t);
+    }
     switch (gState) {
         case ST_MENU:    DrawMenu(); break;
         case ST_LOADING: DrawLoading(); break;
@@ -4592,6 +4954,7 @@ static void DrawFrame(double t)
         case ST_WARDROBE: DrawWardrobe(); break;
         case ST_SETTINGS: DrawSettings(); break;
         case ST_CALIBRATE: DrawCalibration(); break;
+        case ST_HOME: DrawHome(); break;
         default: break;
     }
 }
@@ -4609,7 +4972,8 @@ static std::atomic<int>  gRobotSent{ 0 }, gRobotBlocked{ 0 };
 static std::atomic<int>  gRobotPauseSeen{ 0 };   // 1 if the game was paused when checked, -1 if it was not
 static std::atomic<bool> gRobotFinished{ false };
 // What the robot saw when it went shopping after the song.
-static struct { bool inWardrobe = false, backInMenu = false; int fishBefore = 0, fishAfter = 0, triedOn = -1, hat = -1; unsigned ownedBefore = 0, ownedAfter = 0; } gShop;
+static struct { bool inWardrobe = false, backInMenu = false; int fishBefore = 0, fishAfter = 0, triedOn = -1, hat = -1; unsigned ownedBefore = 0, ownedAfter = 0;
+                bool inHome = false; int homeFishBefore = 0, homeFishAfter = 0, homeLooked = -1, homeRug = -1; unsigned homeOwned = 0; } gShop;
 
 // Taps along to the calibration's ticks a known amount late, and checks the game measures that amount.
 static void RobotCalibrate(void* window)
@@ -4718,6 +5082,18 @@ static void RobotThread(void* window)
         gShop.hat = gCfg.hat;
         tap(0x1B); PlatformSleep(0.5);   // Esc: done
         gShop.backInMenu = gState == ST_MENU;
+
+        // And the cat's room: in with H, down to the round rug, buy it, leave.
+        tap('H'); PlatformSleep(0.8);
+        gShop.inHome = gState == ST_HOME;
+        gShop.homeFishBefore = gProgress.fish;
+        tap(0x28); PlatformSleep(0.6);
+        gShop.homeLooked = gHomeShown[HOME_RUG];
+        tap(0x0D); PlatformSleep(0.6);
+        gShop.homeFishAfter = gProgress.fish;
+        gShop.homeRug = gProgress.home[HOME_RUG];
+        gShop.homeOwned = gProgress.homeOwned;
+        tap(0x1B); PlatformSleep(0.5);
     }
     gRobotFinished = true;
 }
@@ -4784,6 +5160,7 @@ int main(int argc, char** argv)
     int winW = 1280, winH = 720, shotDiff = -1, shotScenery = -1, shotCat = -1, seqLeft = 0, seqStep = 2, seqIndex = 0;
     int shotFish = -1, shotXp = -1;
     bool robotCalibrate = false, robotLesson = false, shotToday = false;
+    int shotHomeTab = HOME_RUG, shotHomeSel = -1;
     const char* robotLog = nullptr;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest")) return SelfTest();
@@ -4805,6 +5182,12 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--sel") && i + 1 < argc) gWardrobeSel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--day") && i + 1 < argc) gFakeDay = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--today")) shotToday = true;
+        else if (!strcmp(argv[i], "--home") && i + 1 < argc) {   // seven digits, one per spot, e.g. 1232103
+            const char* digits = argv[++i];
+            for (int k = 0; k < 7 && digits[k]; k++) gProgress.home[k] = std::clamp(digits[k] - '0', 0, 3);
+        }
+        else if (!strcmp(argv[i], "--home-tab") && i + 1 < argc) shotHomeTab = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--home-sel") && i + 1 < argc) shotHomeSel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--count")) gSimCounts = true;
         else if (!strcmp(argv[i], "--robot") && i + 1 < argc) robotLog = argv[++i];
         else if (!strcmp(argv[i], "--calibrate")) robotCalibrate = true;
@@ -4899,6 +5282,7 @@ int main(int argc, char** argv)
         gCfg.watch = true;
         if (shotView == "wardrobe") gState = ST_WARDROBE;
         else if (shotView == "settings") gState = ST_SETTINGS;
+        else if (shotView == "home") { gState = ST_HOME; gHomeTab = std::min(HOME_SLOTS - 1, shotHomeTab); gHomeSel = shotHomeSel; }
         else if (shotView == "calibrate") {   // --tab picks the phase
             gState = ST_CALIBRATE;
             gCal.phase = std::min(2, gSettingsTab);
@@ -5043,6 +5427,8 @@ int main(int argc, char** argv)
                 fprintf(gLog, "shop: wardrobe opened: %s; tried on hat %d while it was not owned; fish %d -> %d; owned mask %u -> %u; wearing hat %d; back in menu: %s\n",
                         gShop.inWardrobe ? "yes" : "NO", gShop.triedOn, gShop.fishBefore, gShop.fishAfter, gShop.ownedBefore, gShop.ownedAfter, gShop.hat,
                         gShop.backInMenu ? "yes" : "NO");
+                fprintf(gLog, "home: opened: %s; the room showed rug %d while it was not owned; fish %d -> %d; rug placed %d; owned mask %u\n", gShop.inHome ? "yes" : "NO",
+                        gShop.homeLooked, gShop.homeFishBefore, gShop.homeFishAfter, gShop.homeRug, gShop.homeOwned);
                 quit = true;
             }
         }
