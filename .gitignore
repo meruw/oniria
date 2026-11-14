@@ -1,18 +1,18 @@
-# Salida de compilación
+# Build output
 /build/
 *.obj
 *.pdb
 *.ilk
 *.exe
 
-# Dependencias descargadas (ver scripts/fetch_raylib.ps1)
+# Downloaded dependencies (see scripts/fetch_raylib.ps1)
 /third_party/
 
-# Configuración local del juego y capturas de prueba
+# Local game settings and test screenshots
 oniria.cfg
 /shots/
 
-# Editor
+# Editors and tools
 .vs/
 .vscode/
 .claude/
